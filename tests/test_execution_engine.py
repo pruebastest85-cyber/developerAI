@@ -13,13 +13,15 @@ class ExecutionEngineTests(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         temp_dir = Path(tmpdir.name)
-        return DeveloperAgent(
+        agent = DeveloperAgent(
             client=None,
             memory_file=temp_dir / "memory.json",
             prompt_dir="prompts",
             base_dir=".",
             action_log_file=temp_dir / "agent_actions.json",
         )
+        agent.permission_manager.medium_requires_confirmation = False
+        return agent
 
     def test_build_plan_for_debug_task_creates_multi_step_plan(self):
         agent = self._build_agent()

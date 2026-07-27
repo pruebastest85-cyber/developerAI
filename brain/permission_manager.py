@@ -47,6 +47,16 @@ class PermissionManager:
             return False
         return bool(entry and entry.get("requires_confirmation", False))
 
+    def is_confirmation_required(self, tool_name, action_name="execute"):
+        entry = self._resolve_entry(tool_name)
+        if not entry:
+            return False
+        return self._requires_confirmation(tool_name, action_name, entry)
+
+    def get_risk_level(self, tool_name, action_name="execute"):
+        entry = self._resolve_entry(tool_name)
+        return self._resolve_risk(tool_name, action_name, entry)
+
     def create_approval_request(self, tool_name, action_name, important_args=None):
         if not self.registry:
             return None
@@ -84,6 +94,9 @@ class PermissionManager:
         approval_token = str(uuid.uuid4())
         self._granted_tokens[approval_token] = fingerprint
         return approval_token
+
+    def cancel_approval_request(self, request_id):
+        return self._pending_requests.pop(request_id, None) is not None
 
     def can_execute(self, tool_name, action_name="execute", important_args=None, approval_token=None):
         entry = self._resolve_entry(tool_name)

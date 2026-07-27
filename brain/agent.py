@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from brain.approval_controller import ApprovalRequiredError
 from memory.memory import agregar_recuerdo, leer_memoria
 from tools.action_logger import ActionLogger
 from tools.code_analyzer import CodeAnalyzer
@@ -77,14 +78,16 @@ class DeveloperAgent:
         )
 
         if not allowed:
-            args_payload = important_args or {}
-            args_text = json.dumps(args_payload, ensure_ascii=False, sort_keys=True)
-            raise PermissionError(
-                self.permission_manager.explain(tool_name, action_name=action_name)
-                + " "
-                + "Para solicitar aprobación: "
-                + f"tool={tool_name}, action={action_name}, important_args={args_text}."
-            )
+            message = self.permission_manager.explain(tool_name, action_name=action_name)
+            if self.permission_manager.is_confirmation_required(tool_name, action_name=action_name):
+                raise ApprovalRequiredError(
+                    tool_name=tool_name,
+                    action_name=action_name,
+                    important_args=important_args or {},
+                    execute=action,
+                    message=message,
+                )
+            raise PermissionError(message)
         return action()
 
     def _initialize_history(self):
@@ -120,6 +123,8 @@ class DeveloperAgent:
                         action_name="store",
                         important_args={"detail": detail[:120]},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
                 if stored is None:
@@ -142,6 +147,8 @@ class DeveloperAgent:
                     action_name="search_index",
                     important_args={"query": text[:120]},
                 )
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return str(exc)
             if results:
@@ -161,6 +168,8 @@ class DeveloperAgent:
                     important_args={"target": target},
                 )
                 return f"Contenido de {target}:\n\n" + content
+            except ApprovalRequiredError:
+                raise
             except (FileNotFoundError, ValueError, PermissionError) as exc:
                 return str(exc)
 
@@ -173,6 +182,8 @@ class DeveloperAgent:
                     action_name="summarize",
                     important_args={"target": target},
                 )
+            except ApprovalRequiredError:
+                raise
             except (FileNotFoundError, ValueError, SyntaxError, PermissionError) as exc:
                 return str(exc)
 
@@ -197,6 +208,8 @@ class DeveloperAgent:
                 if patch:
                     return "Propuesta de cambio:\n\n" + patch
                 return "No se generó un parche."
+            except ApprovalRequiredError:
+                raise
             except (FileNotFoundError, ValueError, PermissionError) as exc:
                 return str(exc)
 
@@ -208,6 +221,8 @@ class DeveloperAgent:
                     action_name="run_tests_report",
                     important_args={"scope": "default"},
                 )
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return str(exc)
 
@@ -219,6 +234,8 @@ class DeveloperAgent:
                     action_name="status",
                     important_args={"command": "git status --short"},
                 )
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return str(exc)
 
@@ -230,6 +247,8 @@ class DeveloperAgent:
                     action_name="checkpoint",
                     important_args={"message": "Checkpoint before AI modification"},
                 )
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return str(exc)
 
@@ -241,6 +260,8 @@ class DeveloperAgent:
                     action_name="rollback",
                     important_args={"target": "HEAD"},
                 )
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return str(exc)
 
@@ -269,6 +290,8 @@ class DeveloperAgent:
                     important_args={"scope": "default"},
                 )
                 return "Cambio aplicado correctamente.\n\n" + str(result) + "\n\n" + test_report
+            except ApprovalRequiredError:
+                raise
             except (FileNotFoundError, ValueError, PermissionError) as exc:
                 return str(exc)
 

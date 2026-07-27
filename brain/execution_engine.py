@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from brain.approval_controller import ApprovalRequiredError
 from brain.execution_state import ExecutionState
 from brain.reflection_engine import ReflectionEngine
 
@@ -56,6 +57,8 @@ class ExecutionEngine:
                     important_args={"scope": "default"},
                 )
                 return {"name": name, "status": "ok", "result": report}
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return {"name": name, "status": "failed", "result": str(exc)}
 
@@ -69,6 +72,8 @@ class ExecutionEngine:
                     important_args={"target": target},
                 )
                 return {"name": name, "status": "ok", "result": summary}
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return {"name": name, "status": "failed", "result": str(exc)}
 

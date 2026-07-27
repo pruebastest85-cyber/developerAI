@@ -1,3 +1,6 @@
+from brain.approval_controller import ApprovalRequiredError
+
+
 class ToolRouter:
     def __init__(self, agent):
         self.agent = agent
@@ -16,6 +19,8 @@ class ToolRouter:
                         action_name="summarize",
                         important_args={"target": target},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
 
@@ -29,6 +34,8 @@ class ToolRouter:
                         action_name="read_file",
                         important_args={"target": target},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
 
@@ -43,6 +50,8 @@ class ToolRouter:
                     action_name="run_tests_report",
                     important_args={"scope": "default"},
                 )
+            except ApprovalRequiredError:
+                raise
             except PermissionError as exc:
                 return str(exc)
 
@@ -55,6 +64,8 @@ class ToolRouter:
                         action_name="status",
                         important_args={"command": "git status --short"},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
             if "checkpoint" in message.lower():
@@ -65,6 +76,8 @@ class ToolRouter:
                         action_name="checkpoint",
                         important_args={"message": "Checkpoint before AI modification"},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
             if "rollback" in message.lower():
@@ -75,6 +88,8 @@ class ToolRouter:
                         action_name="rollback",
                         important_args={"target": "HEAD"},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
 
@@ -97,6 +112,8 @@ class ToolRouter:
                         action_name="generate_patch",
                         important_args={"path": relative_path},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
 
@@ -119,6 +136,8 @@ class ToolRouter:
                         action_name="apply_patch",
                         important_args={"path": relative_path},
                     )
+                except ApprovalRequiredError:
+                    raise
                 except PermissionError as exc:
                     return str(exc)
 

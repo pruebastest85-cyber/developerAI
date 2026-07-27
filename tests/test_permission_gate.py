@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from brain.approval_controller import ConversationalController
 from brain.agent import DeveloperAgent
 
 
@@ -215,9 +216,10 @@ class PermissionGateTests(unittest.TestCase):
 
     def test_router_path_is_rejected_when_permission_denied(self):
         agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": true}')
-        result = agent.respond("prueba")
+        controller = ConversationalController(agent)
+        result = controller.process_message("prueba")
 
-        self.assertIn("Se requiere confirmación explícita", result)
+        self.assertIn("Se requiere aprobación", result)
 
     def test_no_user_confirmation_bypass_supported(self):
         agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
