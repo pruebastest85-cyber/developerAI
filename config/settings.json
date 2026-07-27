@@ -1,6 +1,7 @@
 {
     "allow_file_changes": true,
     "require_confirmation": true,
+    "medium_risk_requires_confirmation": true,
     "auto_git_checkpoint": true,
     "auto_rollback": true,
     "search_endpoint": "http://localhost:8080/search"

@@ -1,7 +1,6 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-
 
 class ActionLogger:
     def __init__(self, log_file=None):
@@ -26,7 +25,7 @@ class ActionLogger:
 
     def log(self, tool_name, params=None, result=None):
         entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "tool": tool_name,
             "params": params or {},
             "result": result or "",

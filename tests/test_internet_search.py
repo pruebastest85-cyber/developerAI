@@ -7,7 +7,11 @@ from tools.internet_search import InternetSearchTool
 
 class InternetSearchTests(unittest.TestCase):
     def test_execute_returns_results_from_payload(self):
-        tool = InternetSearchTool(endpoint="https://example.test")
+        class DummyLogger:
+            def log(self, *args, **kwargs):
+                return None
+
+        tool = InternetSearchTool(endpoint="https://example.test", logger=DummyLogger())
         payload = '{"results": [{"title": "Demo", "url": "https://demo.test", "content": "hola"}]}'
 
         with patch("tools.internet_search.urlopen") as mock_urlopen:

@@ -48,13 +48,29 @@ class ExecutionEngine:
             return {"name": name, "status": "ok", "result": context[:500]}
 
         if name == "run_tests":
-            report = self.agent.test_runner.run_tests_report()
-            return {"name": name, "status": "ok", "result": report}
+            try:
+                report = self.agent.execute_tool(
+                    "test_runner",
+                    lambda: self.agent.test_runner.run_tests_report(),
+                    action_name="run_tests_report",
+                    important_args={"scope": "default"},
+                )
+                return {"name": name, "status": "ok", "result": report}
+            except PermissionError as exc:
+                return {"name": name, "status": "failed", "result": str(exc)}
 
         if name == "analyze_code":
             target = "brain/agent.py"
-            summary = self.agent.code_analyzer.summarize(target)
-            return {"name": name, "status": "ok", "result": summary}
+            try:
+                summary = self.agent.execute_tool(
+                    "code_analyzer",
+                    lambda: self.agent.code_analyzer.summarize(target),
+                    action_name="summarize",
+                    important_args={"target": target},
+                )
+                return {"name": name, "status": "ok", "result": summary}
+            except PermissionError as exc:
+                return {"name": name, "status": "failed", "result": str(exc)}
 
         if name == "propose_fix":
             return {"name": name, "status": "ok", "result": "Se propone un parche o ajuste basado en el análisis"}

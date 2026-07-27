@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from memory.memory import agregar_recuerdo, leer_memoria
@@ -15,16 +16,18 @@ from brain.memory_manager import MemoryManager
 from brain.permission_manager import PermissionManager
 from brain.planner import Planner
 from brain.tool_router import ToolRouter
+from tools.registry import build_default_registry
 
 
 class DeveloperAgent:
-    def __init__(self, client, memory_file=None, prompt_dir=None, base_dir=None):
+    def __init__(self, client, memory_file=None, prompt_dir=None, base_dir=None, action_log_file=None):
         self.client = client
         self.memory_file = memory_file
         self.prompt_dir = Path(prompt_dir or "prompts")
         self.base_dir = Path(base_dir or ".").resolve()
         self.system_prompt_path = self.prompt_dir / "system.txt"
         self.project_context_path = self.prompt_dir / "project_context.txt"
+        self.settings_path = self.base_dir / "config" / "settings.json"
         self.history = []
         self.code_reader = CodeReader(base_dir=self.base_dir)
         self.code_analyzer = CodeAnalyzer(base_dir=self.base_dir)
@@ -32,14 +35,57 @@ class DeveloperAgent:
         self.patch_applier = PatchApplier(base_dir=self.base_dir)
         self.test_runner = TestRunner(base_dir=self.base_dir)
         self.git_tools = GitTools(base_dir=self.base_dir)
-        self.action_logger = ActionLogger()
+        self.action_logger = ActionLogger(log_file=action_log_file)
         self.context_manager = ContextManager(base_dir=self.base_dir)
         self.planner = Planner()
         self.memory_manager = MemoryManager(memory_file=self.memory_file)
-        self.permission_manager = PermissionManager(registry=None)
+        self.registry = build_default_registry()
+        self.permission_manager = PermissionManager(
+            registry=self.registry,
+            medium_requires_confirmation=self._read_medium_risk_policy(),
+            fail_closed=True,
+        )
         self.tool_router = ToolRouter(self)
         self.execution_engine = ExecutionEngine(self)
         self._initialize_history()
+
+    def _read_medium_risk_policy(self):
+        if not self.settings_path.is_file():
+            return True
+        try:
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return True
+        value = data.get("medium_risk_requires_confirmation")
+        if not isinstance(value, bool):
+            return True
+        return value
+
+    def create_operation_approval_request(self, tool_name, action_name, important_args=None):
+        return self.permission_manager.create_approval_request(
+            tool_name,
+            action_name,
+            important_args=important_args,
+        )
+
+    def execute_tool(self, tool_name, action, action_name="execute", important_args=None, approval_token=None):
+        allowed = self.permission_manager.can_execute(
+            tool_name,
+            action_name=action_name,
+            important_args=important_args,
+            approval_token=approval_token,
+        )
+
+        if not allowed:
+            args_payload = important_args or {}
+            args_text = json.dumps(args_payload, ensure_ascii=False, sort_keys=True)
+            raise PermissionError(
+                self.permission_manager.explain(tool_name, action_name=action_name)
+                + " "
+                + "Para solicitar aprobación: "
+                + f"tool={tool_name}, action={action_name}, important_args={args_text}."
+            )
+        return action()
 
     def _initialize_history(self):
         self.history = [
@@ -67,7 +113,15 @@ class DeveloperAgent:
             if detail.lower().startswith("que "):
                 detail = detail[4:].strip()
             if detail:
-                stored = self.memory_manager.store(detail)
+                try:
+                    stored = self.execute_tool(
+                        "memory",
+                        lambda: self.memory_manager.store(detail),
+                        action_name="store",
+                        important_args={"detail": detail[:120]},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
                 if stored is None:
                     return "No guardé ese recuerdo porque no parecía lo suficientemente relevante."
                 return f"Lo recordaré: {detail}"
@@ -81,7 +135,15 @@ class DeveloperAgent:
             return "Aún no tengo recuerdos guardados sobre eso."
 
         if "dónde está" in text.lower() or "donde esta" in text.lower() or "dónde se encuentra" in text.lower() or "donde se encuentra" in text.lower():
-            results = buscar_en_indice(text)
+            try:
+                results = self.execute_tool(
+                    "project_scanner",
+                    lambda: buscar_en_indice(text),
+                    action_name="search_index",
+                    important_args={"query": text[:120]},
+                )
+            except PermissionError as exc:
+                return str(exc)
             if results:
                 parts = []
                 for name, data in results[:5]:
@@ -92,16 +154,26 @@ class DeveloperAgent:
         if text.lower().startswith("explícame ") or text.lower().startswith("explicame "):
             target = text.split(maxsplit=1)[1].strip()
             try:
-                content = self.code_reader.read_file_with_limit(target)
+                content = self.execute_tool(
+                    "code_reader",
+                    lambda: self.code_reader.read_file_with_limit(target),
+                    action_name="read_file",
+                    important_args={"target": target},
+                )
                 return f"Contenido de {target}:\n\n" + content
-            except (FileNotFoundError, ValueError) as exc:
+            except (FileNotFoundError, ValueError, PermissionError) as exc:
                 return str(exc)
 
         if text.lower().startswith("analiza "):
             target = text.split(maxsplit=1)[1].strip()
             try:
-                return self.code_analyzer.summarize(target)
-            except (FileNotFoundError, ValueError, SyntaxError) as exc:
+                return self.execute_tool(
+                    "code_analyzer",
+                    lambda: self.code_analyzer.summarize(target),
+                    action_name="summarize",
+                    important_args={"target": target},
+                )
+            except (FileNotFoundError, ValueError, SyntaxError, PermissionError) as exc:
                 return str(exc)
 
         if text.lower().startswith("propón cambio ") or text.lower().startswith("propone cambio "):
@@ -116,24 +188,61 @@ class DeveloperAgent:
 
             relative_path, new_content = parts
             try:
-                patch = self.patch_generator.generate_patch_from_file(relative_path, new_content)
+                patch = self.execute_tool(
+                    "patch_generator",
+                    lambda: self.patch_generator.generate_patch_from_file(relative_path, new_content),
+                    action_name="generate_patch",
+                    important_args={"path": relative_path},
+                )
                 if patch:
                     return "Propuesta de cambio:\n\n" + patch
                 return "No se generó un parche."
-            except (FileNotFoundError, ValueError) as exc:
+            except (FileNotFoundError, ValueError, PermissionError) as exc:
                 return str(exc)
 
         if text.lower().startswith("prueba") or text.lower().startswith("ejecuta tests"):
-            return self.test_runner.run_tests_report()
+            try:
+                return self.execute_tool(
+                    "test_runner",
+                    lambda: self.test_runner.run_tests_report(),
+                    action_name="run_tests_report",
+                    important_args={"scope": "default"},
+                )
+            except PermissionError as exc:
+                return str(exc)
 
         if text.lower().startswith("git status"):
-            return self._format_git_result(self.git_tools.status())
+            try:
+                return self.execute_tool(
+                    "git_tools",
+                    lambda: self._format_git_result(self.git_tools.status()),
+                    action_name="status",
+                    important_args={"command": "git status --short"},
+                )
+            except PermissionError as exc:
+                return str(exc)
 
         if text.lower().startswith("checkpoint"):
-            return self._format_git_result(self.git_tools.checkpoint())
+            try:
+                return self.execute_tool(
+                    "git_tools",
+                    lambda: self._format_git_result(self.git_tools.checkpoint()),
+                    action_name="checkpoint",
+                    important_args={"message": "Checkpoint before AI modification"},
+                )
+            except PermissionError as exc:
+                return str(exc)
 
         if text.lower().startswith("rollback"):
-            return self._format_git_result(self.git_tools.rollback())
+            try:
+                return self.execute_tool(
+                    "git_tools",
+                    lambda: self._format_git_result(self.git_tools.rollback()),
+                    action_name="rollback",
+                    important_args={"target": "HEAD"},
+                )
+            except PermissionError as exc:
+                return str(exc)
 
         if text.lower().startswith("aplica cambio ") or text.lower().startswith("aplica el cambio "):
             try:
@@ -147,10 +256,20 @@ class DeveloperAgent:
 
             relative_path, new_content, old_content = parts
             try:
-                result = self.patch_applier.apply_patch(relative_path, old_content, new_content)
-                test_report = self.test_runner.run_tests_report()
+                result = self.execute_tool(
+                    "patch_applier",
+                    lambda: self.patch_applier.apply_patch(relative_path, old_content, new_content),
+                    action_name="apply_patch",
+                    important_args={"path": relative_path},
+                )
+                test_report = self.execute_tool(
+                    "test_runner",
+                    lambda: self.test_runner.run_tests_report(),
+                    action_name="run_tests_report",
+                    important_args={"scope": "default"},
+                )
                 return "Cambio aplicado correctamente.\n\n" + str(result) + "\n\n" + test_report
-            except (FileNotFoundError, ValueError) as exc:
+            except (FileNotFoundError, ValueError, PermissionError) as exc:
                 return str(exc)
 
         return None
@@ -186,12 +305,6 @@ class DeveloperAgent:
             return memory_response
 
         plan = self.planner.plan(message)
-        if plan:
-            for tool_name in plan:
-                if tool_name == "internet_search":
-                    continue
-                if not self.permission_manager.can_execute(tool_name, user_confirmation=False):
-                    return self.permission_manager.explain(tool_name, user_confirmation=False)
 
         if self._looks_like_complex_task(message):
             result = self.execution_engine.run(message)

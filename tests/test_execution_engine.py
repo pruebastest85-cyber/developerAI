@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from brain.agent import DeveloperAgent
 from brain.execution_engine import ExecutionEngine
@@ -7,8 +9,20 @@ from brain.reflection_engine import ReflectionEngine
 
 
 class ExecutionEngineTests(unittest.TestCase):
+    def _build_agent(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        temp_dir = Path(tmpdir.name)
+        return DeveloperAgent(
+            client=None,
+            memory_file=temp_dir / "memory.json",
+            prompt_dir="prompts",
+            base_dir=".",
+            action_log_file=temp_dir / "agent_actions.json",
+        )
+
     def test_build_plan_for_debug_task_creates_multi_step_plan(self):
-        agent = DeveloperAgent(client=None, memory_file="memory/memory.json", prompt_dir="prompts", base_dir=".")
+        agent = self._build_agent()
         engine = ExecutionEngine(agent)
 
         plan = engine.build_plan("Analiza el proyecto y dime por qué falla")
@@ -20,7 +34,8 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("reflect", steps)
 
     def test_execute_plan_returns_structured_report(self):
-        agent = DeveloperAgent(client=None, memory_file="memory/memory.json", prompt_dir="prompts", base_dir=".")
+        agent = self._build_agent()
+        agent.test_runner.run_tests_report = lambda: "tests-ok"
         engine = ExecutionEngine(agent)
 
         result = engine.run("Analiza el proyecto y dime por qué falla")
@@ -47,7 +62,7 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("replanificar", decision["reason"].lower())
 
     def test_run_replans_when_a_step_fails(self):
-        agent = DeveloperAgent(client=None, memory_file="memory/memory.json", prompt_dir="prompts", base_dir=".")
+        agent = self._build_agent()
 
         class FailingExecutionEngine(ExecutionEngine):
             def _run_step(self, step, message):

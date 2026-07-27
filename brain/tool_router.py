@@ -9,26 +9,74 @@ class ToolRouter:
         if "code_analyzer" in plan:
             if message.lower().startswith(("analiza", "analizar")):
                 target = message.split(maxsplit=1)[1].strip() if len(message.split()) > 1 else ""
-                return self.agent.code_analyzer.summarize(target)
+                try:
+                    return self.agent.execute_tool(
+                        "code_analyzer",
+                        lambda: self.agent.code_analyzer.summarize(target),
+                        action_name="summarize",
+                        important_args={"target": target},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
 
         if "code_reader" in plan:
             if message.lower().startswith(("explícame", "explicame")):
                 target = message.split(maxsplit=1)[1].strip() if len(message.split()) > 1 else ""
-                return self.agent.code_reader.read_file_with_limit(target)
+                try:
+                    return self.agent.execute_tool(
+                        "code_reader",
+                        lambda: self.agent.code_reader.read_file_with_limit(target),
+                        action_name="read_file",
+                        important_args={"target": target},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
 
         if "memory" in plan:
             return self.agent.handle_memory(message)
 
         if "test_runner" in plan:
-            return self.agent.test_runner.run_tests_report()
+            try:
+                return self.agent.execute_tool(
+                    "test_runner",
+                    lambda: self.agent.test_runner.run_tests_report(),
+                    action_name="run_tests_report",
+                    important_args={"scope": "default"},
+                )
+            except PermissionError as exc:
+                return str(exc)
 
         if "git_tools" in plan:
             if "status" in message.lower():
-                return self.agent._format_git_result(self.agent.git_tools.status())
+                try:
+                    return self.agent.execute_tool(
+                        "git_tools",
+                        lambda: self.agent._format_git_result(self.agent.git_tools.status()),
+                        action_name="status",
+                        important_args={"command": "git status --short"},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
             if "checkpoint" in message.lower():
-                return self.agent._format_git_result(self.agent.git_tools.checkpoint())
+                try:
+                    return self.agent.execute_tool(
+                        "git_tools",
+                        lambda: self.agent._format_git_result(self.agent.git_tools.checkpoint()),
+                        action_name="checkpoint",
+                        important_args={"message": "Checkpoint before AI modification"},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
             if "rollback" in message.lower():
-                return self.agent._format_git_result(self.agent.git_tools.rollback())
+                try:
+                    return self.agent.execute_tool(
+                        "git_tools",
+                        lambda: self.agent._format_git_result(self.agent.git_tools.rollback()),
+                        action_name="rollback",
+                        important_args={"target": "HEAD"},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
 
         if "patch_generator" in plan:
             if message.lower().startswith(("propón cambio", "propone cambio")):
@@ -42,7 +90,15 @@ class ToolRouter:
                     return "Formato esperado: 'Propón cambio <archivo> | <nuevo contenido>'"
 
                 relative_path, new_content = parts
-                return self.agent.patch_generator.generate_patch_from_file(relative_path, new_content)
+                try:
+                    return self.agent.execute_tool(
+                        "patch_generator",
+                        lambda: self.agent.patch_generator.generate_patch_from_file(relative_path, new_content),
+                        action_name="generate_patch",
+                        important_args={"path": relative_path},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
 
         if "patch_applier" in plan:
             if message.lower().startswith(("aplica cambio", "aplica el cambio")):
@@ -56,6 +112,14 @@ class ToolRouter:
                     return "Formato esperado: 'Aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
 
                 relative_path, new_content, old_content = parts
-                return self.agent.patch_applier.apply_patch(relative_path, old_content, new_content)
+                try:
+                    return self.agent.execute_tool(
+                        "patch_applier",
+                        lambda: self.agent.patch_applier.apply_patch(relative_path, old_content, new_content),
+                        action_name="apply_patch",
+                        important_args={"path": relative_path},
+                    )
+                except PermissionError as exc:
+                    return str(exc)
 
         return None

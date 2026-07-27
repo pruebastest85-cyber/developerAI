@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from brain.planner import Planner
 from brain.tool_router import ToolRouter
@@ -13,10 +15,18 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIn("code_reader", plan)
 
     def test_router_dispatches_to_memory_tool(self):
-        agent = DeveloperAgent(client=None, memory_file="memory/memory.json", prompt_dir="prompts", base_dir=".")
-        router = ToolRouter(agent)
-        result = router.dispatch(["memory"], "Recuerda que estoy probando el router")
-        self.assertIn("Lo recordaré", result)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            agent = DeveloperAgent(
+                client=None,
+                memory_file=temp_dir / "memory.json",
+                prompt_dir="prompts",
+                base_dir=".",
+                action_log_file=temp_dir / "agent_actions.json",
+            )
+            router = ToolRouter(agent)
+            result = router.dispatch(["memory"], "Recuerda que estoy probando el router")
+            self.assertIn("Lo recordaré", result)
 
 
 if __name__ == "__main__":

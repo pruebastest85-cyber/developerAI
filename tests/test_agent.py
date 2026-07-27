@@ -15,6 +15,7 @@ class DeveloperAgentTests(unittest.TestCase):
                 client=None,
                 memory_file=memory_file,
                 prompt_dir=Path("prompts"),
+                action_log_file=temp_dir / "agent_actions.json",
             )
 
             response = agent.handle_memory("Recuerda que estoy construyendo un agente modular")
