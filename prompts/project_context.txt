@@ -1,0 +1,19 @@
+Proyecto actual: DeveloperAI.
+
+Es un asistente local en Python que se comunica con un modelo compatible con OpenAI a través de una API local en http://localhost:1234/v1.
+
+Archivos principales:
+- main.py: punto de entrada del chat.
+- memory/memory.py: funciones para leer, guardar y agregar recuerdos.
+- memory/memory.json: archivo JSON con la memoria persistente.
+- prompts/system.txt: identidad y reglas del asistente.
+
+Estructura general del proyecto:
+- app/: carpeta para la aplicación.
+- brain/: lógica del cerebro del asistente.
+- config/: configuración.
+- internet/: integración con internet o APIs externas.
+- logs/: registros.
+- tools/: herramientas y utilidades.
+
+Cuando el usuario pregunte por este proyecto, explica su arquitectura, los archivos importantes y cómo fluye la información entre ellos.
