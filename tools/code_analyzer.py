@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from brain.path_policy import PathPolicy, PathValidationError
+from tools.code_reader import ReadLimitExceededError
 from tools.tool_result import ToolResult, execute_and_normalize, legacy_tool_value
 
 
@@ -14,12 +15,39 @@ class CodeAnalyzer:
         self.base_dir = Path(base_dir or ".").resolve()
         self.path_policy = PathPolicy(self.base_dir)
 
-    def analyze_file(self, relative_path: str) -> Dict[str, Any]:
+    @staticmethod
+    def _validate_max_bytes(max_read_bytes_per_file):
+        if max_read_bytes_per_file is None:
+            return None
+        if (
+            isinstance(max_read_bytes_per_file, bool)
+            or not isinstance(max_read_bytes_per_file, int)
+        ):
+            raise TypeError("max_read_bytes_per_file debe ser un entero")
+        if max_read_bytes_per_file <= 0:
+            raise ValueError("max_read_bytes_per_file debe ser mayor que cero")
+        return max_read_bytes_per_file
+
+    def analyze_file(
+        self,
+        relative_path: str,
+        max_read_bytes_per_file=None,
+    ) -> Dict[str, Any]:
         path = self.path_policy.resolve_for_read(relative_path).absolute
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"No existe el archivo: {relative_path}")
 
-        source = path.read_text(encoding="utf-8")
+        limit = self._validate_max_bytes(max_read_bytes_per_file)
+        if limit is None:
+            source = path.read_text(encoding="utf-8")
+        else:
+            with path.open("rb") as handle:
+                payload = handle.read(limit + 1)
+            if len(payload) > limit:
+                raise ReadLimitExceededError(
+                    "El archivo supera max_read_bytes_per_file"
+                )
+            source = payload.decode("utf-8")
         tree = ast.parse(source, filename=str(path))
 
         functions = []
@@ -47,8 +75,11 @@ class CodeAnalyzer:
             "imports": imports,
         }
 
-    def summarize(self, relative_path: str) -> str:
-        analysis = self.analyze_file(relative_path)
+    def summarize(self, relative_path: str, max_read_bytes_per_file=None) -> str:
+        analysis = self.analyze_file(
+            relative_path,
+            max_read_bytes_per_file=max_read_bytes_per_file,
+        )
         parts = [f"Archivo: {analysis['archivo']}", f"Líneas: {analysis['lineas']}"]
         if analysis["funciones"]:
             parts.append("Funciones: " + ", ".join(analysis["funciones"]))
@@ -62,14 +93,24 @@ class CodeAnalyzer:
         if not isinstance(args, dict) or not isinstance(args.get("path"), str):
             result = ToolResult.failure(self.name, error="path debe ser una cadena")
             return result if structured else legacy_tool_value(result)
+        max_bytes = args.get("max_read_bytes_per_file")
+        try:
+            self._validate_max_bytes(max_bytes)
+        except (TypeError, ValueError) as exc:
+            result = ToolResult.failure(self.name, error=str(exc))
+            return result if structured else legacy_tool_value(result)
         result = execute_and_normalize(
             self.name,
-            lambda: self.summarize(args["path"]),
+            lambda: self.summarize(
+                args["path"],
+                max_read_bytes_per_file=max_bytes,
+            ),
             operational_exceptions=(
                 OSError,
                 UnicodeError,
                 SyntaxError,
                 PathValidationError,
+                ReadLimitExceededError,
             ),
         )
         return result if structured else legacy_tool_value(result)
