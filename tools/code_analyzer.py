@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 from typing import List, Dict, Any
 
+from brain.path_policy import PathPolicy, PathValidationError
 from tools.tool_result import ToolResult, execute_and_normalize, legacy_tool_value
 
 
@@ -11,11 +12,10 @@ class CodeAnalyzer:
 
     def __init__(self, base_dir=None):
         self.base_dir = Path(base_dir or ".").resolve()
+        self.path_policy = PathPolicy(self.base_dir)
 
     def analyze_file(self, relative_path: str) -> Dict[str, Any]:
-        path = (self.base_dir / relative_path).resolve()
-        if not str(path).startswith(str(self.base_dir)):
-            raise ValueError("Ruta fuera del directorio permitido")
+        path = self.path_policy.resolve_for_read(relative_path).absolute
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"No existe el archivo: {relative_path}")
 
@@ -65,6 +65,11 @@ class CodeAnalyzer:
         result = execute_and_normalize(
             self.name,
             lambda: self.summarize(args["path"]),
-            operational_exceptions=(OSError, UnicodeError, SyntaxError),
+            operational_exceptions=(
+                OSError,
+                UnicodeError,
+                SyntaxError,
+                PathValidationError,
+            ),
         )
         return result if structured else legacy_tool_value(result)
