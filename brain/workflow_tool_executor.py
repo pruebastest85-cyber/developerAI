@@ -100,6 +100,16 @@ ACTION_CONTRACTS = {
     ),
 }
 
+CORRECTION_WORKFLOW_ACTION = (
+    "correction_workflow",
+    "apply_change_proposal",
+)
+
+
+def is_controlled_workflow_step(step: StepSpec) -> bool:
+    """Return whether a step is executed by the workflow runtime itself."""
+    return (step.tool, step.action) == CORRECTION_WORKFLOW_ACTION
+
 
 class WorkflowToolExecutor:
     """Validate and execute only explicitly declared current tool contracts."""
@@ -110,11 +120,16 @@ class WorkflowToolExecutor:
 
     @property
     def allowed_tools(self) -> frozenset[str]:
-        return frozenset(tool for tool, _ in ACTION_CONTRACTS)
+        return frozenset(
+            {tool for tool, _ in ACTION_CONTRACTS}
+            | {CORRECTION_WORKFLOW_ACTION[0]}
+        )
 
     def validate_plan(self, plan: WorkflowPlan) -> None:
         registry_names = set(self.agent.registry.names())
         for step in plan.steps:
+            if is_controlled_workflow_step(step):
+                continue
             contract = ACTION_CONTRACTS.get((step.tool, step.action))
             if contract is None:
                 raise WorkflowExecutorConfigurationError(

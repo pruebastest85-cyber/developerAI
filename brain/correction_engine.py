@@ -306,7 +306,13 @@ class CorrectionEngine:
             lambda: str(uuid.uuid4())
         )
         self.runtime: CorrectionRuntimeState | None = None
+        self._pending_approval_request: CorrectionApprovalRequest | None = None
         self._validate_dependencies()
+
+    @property
+    def pending_approval_request(self) -> CorrectionApprovalRequest | None:
+        """Return the exact logical request currently owned by this engine."""
+        return self._pending_approval_request
 
     def start(
         self,
@@ -389,6 +395,7 @@ class CorrectionEngine:
             raise CorrectionApprovalError(
                 "El servicio devolvió una decisión incompatible"
             )
+        self._pending_approval_request = None
         if not decision:
             runtime.record_rejection(
                 "approval_rejected",
@@ -440,6 +447,7 @@ class CorrectionEngine:
             )
         if runtime.pending_approval_request_id:
             self.approval_service.cancel(runtime.pending_approval_request_id)
+        self._pending_approval_request = None
         runtime.mark_cancelled(reason)
         return runtime
 
@@ -499,6 +507,7 @@ class CorrectionEngine:
                 "El resumen de aprobación no coincide con la propuesta"
             )
         runtime.set_pending_approval(request.request_id)
+        self._pending_approval_request = request
 
     def _check_accumulated_limits(
         self,

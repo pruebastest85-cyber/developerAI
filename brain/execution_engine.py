@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from brain.approval_controller import ApprovalRequiredError
+from brain.change_proposal_adapter import ChangeProposalAdaptationError
+from brain.correction_engine import CorrectionEngine
+from brain.correction_runtime import (
+    CorrectionRuntimeState,
+)
+from brain.correction_workflow import CorrectionWorkflowController
 from brain.execution_state import ExecutionState
 from brain.reflection_engine import ReflectionEngine
 from brain.workflow_limits import WorkflowLimits
@@ -19,6 +25,7 @@ from brain.workflow_tool_executor import (
     InvalidWorkflowToolResultError,
     WorkflowLimitExceededError,
     WorkflowToolExecutor,
+    is_controlled_workflow_step,
 )
 from tools.tool_result import ToolResult
 
@@ -47,13 +54,31 @@ ADMINISTRATIVE_STEP_FIELDS = frozenset(
 
 
 class ExecutionEngine:
-    def __init__(self, agent, max_retries: int = 2):
+    def __init__(
+        self,
+        agent,
+        max_retries: int = 2,
+        *,
+        correction_controller_factory=None,
+    ):
         self.agent = agent
         self.reflection_engine = ReflectionEngine()
         self.max_retries = max_retries
         self.last_state: Optional[ExecutionState] = None
         self.last_workflow_runtime: Optional[WorkflowRuntimeState] = None
         self.workflow_limits = WorkflowLimits()
+        self.correction_controller_factory = (
+            correction_controller_factory
+            or self._default_correction_controller
+        )
+
+    def _default_correction_controller(self) -> CorrectionWorkflowController:
+        return CorrectionWorkflowController(
+            engine=CorrectionEngine(
+                workspace=self.agent.base_dir,
+                limits=self.workflow_limits,
+            )
+        )
 
     def build_plan(self, message: str) -> List[Dict[str, str]]:
         text = message.lower().strip()
@@ -525,20 +550,46 @@ class ExecutionEngine:
             step_runtime.mark_running(resolved_args)
             runtime.current_step_id = step_id
             try:
-                result = executor.execute(step, resolved_args, runtime)
+                if is_controlled_workflow_step(step):
+                    result = self._start_correction_step(
+                        step,
+                        step_runtime,
+                        resolved_args,
+                    )
+                else:
+                    result = executor.execute(step, resolved_args, runtime)
             except ApprovalRequiredError as exc:
                 step_runtime.mark_awaiting_approval(resolved_args)
                 runtime.mark_awaiting_approval(step_id)
-                self._attach_workflow_continuation(
-                    exc,
-                    plan,
-                    runtime,
-                    executor,
-                    resolver,
-                    step_id,
-                    resolved_args,
-                )
+                if is_controlled_workflow_step(step):
+                    self._attach_correction_continuation(
+                        exc,
+                        plan,
+                        runtime,
+                        executor,
+                        resolver,
+                        step_id,
+                        resolved_args,
+                    )
+                else:
+                    self._attach_workflow_continuation(
+                        exc,
+                        plan,
+                        runtime,
+                        executor,
+                        resolver,
+                        step_id,
+                        resolved_args,
+                    )
                 raise
+            except ChangeProposalAdaptationError as exc:
+                step_runtime.clear_correction_controller()
+                result = ToolResult.failure(
+                    step.tool,
+                    error=str(exc),
+                    metadata={"exception_type": type(exc).__name__},
+                    retryable=False,
+                )
             except (WorkflowLimitExceededError, InvalidWorkflowToolResultError) as exc:
                 result = ToolResult.failure(
                     step.tool,
@@ -546,12 +597,245 @@ class ExecutionEngine:
                     metadata={"exception_type": type(exc).__name__},
                     retryable=False,
                 )
+            except BaseException as exc:
+                if is_controlled_workflow_step(step):
+                    self._record_correction_exception(
+                        plan,
+                        runtime,
+                        step,
+                        resolved_args,
+                        exc,
+                    )
+                raise
+
+            if isinstance(result, CorrectionRuntimeState):
+                if result.status == "awaiting_correction":
+                    runtime.mark_awaiting_correction(
+                        step_id,
+                        result.terminal_reason,
+                    )
+                    return runtime
+                result = self._correction_tool_result(step.tool, result)
+                step_runtime.clear_correction_controller()
 
             runtime.record_result(step_id, result)
             self._log_workflow_step(step, resolved_args, result)
 
         runtime.finish(plan)
         return runtime
+
+    def submit_workflow_correction(
+        self,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        arguments: Dict[str, Any],
+    ) -> WorkflowRuntimeState:
+        """Submit an explicit proposal to the correction step currently paused."""
+        if not isinstance(plan, WorkflowPlan):
+            raise TypeError("plan debe ser WorkflowPlan")
+        if not isinstance(runtime, WorkflowRuntimeState):
+            raise TypeError("runtime debe ser WorkflowRuntimeState")
+        if not isinstance(arguments, dict):
+            raise TypeError("arguments debe ser dict")
+        runtime.validate_for_plan(plan)
+        step_id = runtime.awaiting_step_id
+        if runtime.status != "awaiting_correction" or step_id is None:
+            raise WorkflowRuntimeTransitionError(
+                "El workflow no espera una corrección"
+            )
+        step = next(item for item in plan.steps if item.id == step_id)
+        if not is_controlled_workflow_step(step):
+            raise WorkflowRuntimeTransitionError(
+                f"El paso {step_id} no es un flujo de corrección"
+            )
+        step_runtime = runtime.steps[step_id]
+        controller = step_runtime.correction_controller
+        if controller is None:
+            raise WorkflowRuntimeTransitionError(
+                f"El paso {step_id} no conserva su controlador"
+            )
+
+        runtime.begin_correction_submission(step_id)
+        submitted_args = dict(arguments)
+        try:
+            correction_runtime = controller.submit_correction(submitted_args)
+        except ApprovalRequiredError as exc:
+            step_runtime.mark_awaiting_approval(submitted_args)
+            runtime.mark_awaiting_approval(step_id)
+            self._attach_correction_continuation(
+                exc,
+                plan,
+                runtime,
+                WorkflowToolExecutor(self.agent, limits=self.workflow_limits),
+                ArgumentResolver(),
+                step_id,
+                submitted_args,
+            )
+            raise
+        except ChangeProposalAdaptationError:
+            runtime.mark_awaiting_correction(step_id, "invalid_correction")
+            raise
+        except BaseException as exc:
+            self._record_correction_exception(
+                plan,
+                runtime,
+                step,
+                submitted_args,
+                exc,
+            )
+            raise
+
+        return self._complete_correction_state(
+            plan,
+            runtime,
+            WorkflowToolExecutor(self.agent, limits=self.workflow_limits),
+            ArgumentResolver(),
+            step_id,
+            submitted_args,
+            correction_runtime,
+        )
+
+    def _start_correction_step(
+        self,
+        step,
+        step_runtime,
+        resolved_args: Dict[str, Any],
+    ) -> CorrectionRuntimeState:
+        controller = self.correction_controller_factory()
+        if not isinstance(controller, CorrectionWorkflowController):
+            raise TypeError(
+                "correction_controller_factory debe devolver "
+                "CorrectionWorkflowController"
+            )
+        step_runtime.correction_controller = controller
+        try:
+            return controller.start(step.goal, resolved_args)
+        except ApprovalRequiredError:
+            raise
+        except BaseException:
+            step_runtime.clear_correction_controller()
+            raise
+
+    @staticmethod
+    def _correction_tool_result(
+        tool_name: str,
+        correction_runtime: CorrectionRuntimeState,
+    ) -> ToolResult:
+        metadata = {
+            "correction_status": correction_runtime.status,
+            "runtime_id": correction_runtime.runtime_id,
+            "proposal_id": (
+                correction_runtime.current_proposal.proposal_id
+                if correction_runtime.current_proposal is not None
+                else None
+            ),
+        }
+        if correction_runtime.status == "completed":
+            return ToolResult.success(
+                tool_name,
+                data=correction_runtime,
+                metadata=metadata,
+            )
+        return ToolResult.failure(
+            tool_name,
+            data=correction_runtime,
+            error=correction_runtime.terminal_reason or correction_runtime.status,
+            metadata=metadata,
+            retryable=False,
+        )
+
+    def _complete_correction_state(
+        self,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        executor: WorkflowToolExecutor,
+        resolver: ArgumentResolver,
+        step_id: str,
+        resolved_args: Dict[str, Any],
+        correction_runtime: CorrectionRuntimeState,
+    ) -> WorkflowRuntimeState:
+        step = next(item for item in plan.steps if item.id == step_id)
+        if correction_runtime.status == "awaiting_correction":
+            runtime.mark_awaiting_correction(
+                step_id,
+                correction_runtime.terminal_reason,
+            )
+            return runtime
+        result = self._correction_tool_result(step.tool, correction_runtime)
+        runtime.steps[step_id].clear_correction_controller()
+        runtime.record_result(step_id, result)
+        self._log_workflow_step(step, resolved_args, result)
+        return self._continue_workflow(plan, runtime, executor, resolver)
+
+    def _record_correction_exception(
+        self,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        step,
+        resolved_args: Dict[str, Any],
+        error: BaseException,
+    ) -> None:
+        result = ToolResult.failure(
+            step.tool,
+            error=str(error) or type(error).__name__,
+            metadata={"exception_type": type(error).__name__},
+            retryable=False,
+        )
+        runtime.steps[step.id].clear_correction_controller()
+        runtime.record_result(step.id, result)
+        self._log_workflow_step(step, resolved_args, result)
+        runtime.finish(plan)
+
+    def _attach_correction_continuation(
+        self,
+        error: ApprovalRequiredError,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        executor: WorkflowToolExecutor,
+        resolver: ArgumentResolver,
+        step_id: str,
+        resolved_args: Dict[str, Any],
+    ) -> None:
+        approved_action = error.execute
+        cancelled_action = error.on_cancel
+
+        def continue_after_approval():
+            runtime.begin_approved_step(step_id)
+            try:
+                correction_runtime = approved_action()
+                return self._complete_correction_state(
+                    plan,
+                    runtime,
+                    executor,
+                    resolver,
+                    step_id,
+                    resolved_args,
+                    correction_runtime,
+                )
+            except BaseException as exc:
+                step = next(item for item in plan.steps if item.id == step_id)
+                self._record_correction_exception(
+                    plan,
+                    runtime,
+                    step,
+                    resolved_args,
+                    exc,
+                )
+                raise
+
+        def cancel_pending(reason: str) -> None:
+            try:
+                if cancelled_action is not None:
+                    cancelled_action(reason)
+            finally:
+                runtime.mark_cancelled(step_id, reason)
+
+        def record_request(request_id: str) -> None:
+            runtime.approval_request_id = request_id
+
+        error.execute = continue_after_approval
+        error.on_cancel = cancel_pending
+        error.on_request = record_request
 
     def _attach_workflow_continuation(
         self,

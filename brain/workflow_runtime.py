@@ -16,10 +16,18 @@ STEP_STATUSES = frozenset(
         "partial",
         "skipped",
         "awaiting_approval",
+        "awaiting_correction",
     }
 )
 WORKFLOW_STATUSES = frozenset(
-    {"running", "awaiting_approval", "completed", "failed", "cancelled"}
+    {
+        "running",
+        "awaiting_approval",
+        "awaiting_correction",
+        "completed",
+        "failed",
+        "cancelled",
+    }
 )
 
 
@@ -40,6 +48,7 @@ class RuntimeStepState:
     resolved_args: dict[str, Any] | None = None
     reason: str | None = None
     attempts: int = 0
+    correction_controller: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.status not in STEP_STATUSES:
@@ -55,7 +64,7 @@ class RuntimeStepState:
         self.reason = None
 
     def mark_awaiting_approval(self, resolved_args: dict[str, Any]) -> None:
-        if self.status not in {"pending", "running"}:
+        if self.status not in {"pending", "running", "awaiting_correction"}:
             raise WorkflowRuntimeTransitionError(
                 f"No se puede pausar {self.step_id} desde {self.status}"
             )
@@ -63,8 +72,19 @@ class RuntimeStepState:
         self.resolved_args = resolved_args
         self.reason = "approval_required"
 
-    def record_result(self, result: ToolResult) -> None:
+    def mark_awaiting_correction(self, reason: str | None = None) -> None:
         if self.status not in {"running", "awaiting_approval"}:
+            raise WorkflowRuntimeTransitionError(
+                f"No se puede esperar corrección en {self.step_id} desde {self.status}"
+            )
+        self.status = "awaiting_correction"
+        self.reason = reason or "correction_required"
+
+    def clear_correction_controller(self) -> None:
+        self.correction_controller = None
+
+    def record_result(self, result: ToolResult) -> None:
+        if self.status not in {"running", "awaiting_approval", "awaiting_correction"}:
             raise WorkflowRuntimeTransitionError(
                 f"No se puede registrar resultado de {self.step_id} desde {self.status}"
             )
@@ -155,6 +175,10 @@ class WorkflowRuntimeState:
             raise WorkflowRuntimeTransitionError(
                 "Un workflow cancelado no puede reanudarse"
             )
+        if self.status == "awaiting_correction":
+            raise WorkflowRuntimeTransitionError(
+                "Un workflow pendiente requiere submit_workflow_correction"
+            )
         self.status = "running"
         self.current_step_id = None
         self.awaiting_step_id = None
@@ -173,6 +197,34 @@ class WorkflowRuntimeState:
         self.status = "awaiting_approval"
         self.current_step_id = step_id
         self.awaiting_step_id = step_id
+
+    def mark_awaiting_correction(self, step_id: str, reason: str | None = None) -> None:
+        if self.status not in {"running", "awaiting_approval"}:
+            raise WorkflowRuntimeTransitionError(
+                f"No se puede esperar corrección desde {self.status}"
+            )
+        self.steps[step_id].mark_awaiting_correction(reason)
+        self.status = "awaiting_correction"
+        self.current_step_id = step_id
+        self.awaiting_step_id = step_id
+        self.approval_request_id = None
+
+    def begin_correction_submission(self, step_id: str) -> None:
+        if self.status != "awaiting_correction" or self.awaiting_step_id != step_id:
+            raise WorkflowRuntimeTransitionError(
+                f"El paso {step_id} no espera una corrección"
+            )
+        step = self.steps[step_id]
+        if step.correction_controller is None:
+            raise WorkflowRuntimeTransitionError(
+                f"El paso {step_id} no conserva su controlador"
+            )
+        self.status = "running"
+        self.current_step_id = step_id
+        self.awaiting_step_id = None
+        self.approval_request_id = None
+        step.status = "running"
+        step.reason = None
 
     def begin_approved_step(self, step_id: str) -> None:
         if self.status != "awaiting_approval" or self.awaiting_step_id != step_id:
@@ -206,6 +258,7 @@ class WorkflowRuntimeState:
             )
         step.status = "skipped"
         step.reason = reason
+        step.clear_correction_controller()
         self.status = "cancelled"
         self.current_step_id = step_id
         self.awaiting_step_id = None
