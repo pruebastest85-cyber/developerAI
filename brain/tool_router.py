@@ -1,6 +1,7 @@
 import hashlib
 
 from brain.approval_controller import ApprovalRequiredError
+from brain.patch_request import build_patch_approval_args, parse_patch_command
 
 
 class ToolRouter:
@@ -166,27 +167,28 @@ class ToolRouter:
                     return str(exc)
 
         if "patch_applier" in plan:
-            if message.lower().startswith(("aplica cambio", "aplica el cambio")):
-                try:
-                    target = message.split(maxsplit=2)[2].strip()
-                except IndexError:
-                    return "Formato esperado: 'Aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
+            try:
+                parsed = parse_patch_command(message)
+            except ValueError:
+                return "Formato esperado: 'aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
 
-                parts = target.split(" | ", 2)
-                if len(parts) != 3:
-                    return "Formato esperado: 'Aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
+            if parsed is None:
+                return None
 
-                relative_path, new_content, old_content = parts
-                try:
-                    return self.agent.execute_tool(
-                        "patch_applier",
-                        lambda: self.agent.patch_applier.apply_patch(relative_path, old_content, new_content),
-                        action_name="apply_patch",
-                        important_args={"path": relative_path},
-                    )
-                except ApprovalRequiredError:
-                    raise
-                except PermissionError as exc:
-                    return str(exc)
+            relative_path, new_content, old_content = parsed
+
+            approval_args = build_patch_approval_args(relative_path, old_content, new_content)
+
+            try:
+                return self.agent.execute_tool(
+                    "patch_applier",
+                    lambda: self.agent.patch_applier.apply_patch(relative_path, old_content, new_content),
+                    action_name="apply_patch",
+                    important_args=approval_args,
+                )
+            except ApprovalRequiredError:
+                raise
+            except PermissionError as exc:
+                return str(exc)
 
         return None

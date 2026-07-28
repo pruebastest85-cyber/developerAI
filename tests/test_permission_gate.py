@@ -19,6 +19,17 @@ class PermissionGateTests(unittest.TestCase):
             "content_bytes": len(content_bytes),
         }
 
+    def _patch_args(self, relative_path, old_content, new_content):
+        old_bytes = old_content.encode("utf-8")
+        new_bytes = new_content.encode("utf-8")
+        return {
+            "path": relative_path,
+            "old_sha256": hashlib.sha256(old_bytes).hexdigest(),
+            "new_sha256": hashlib.sha256(new_bytes).hexdigest(),
+            "old_bytes": len(old_bytes),
+            "new_bytes": len(new_bytes),
+        }
+
     def _build_agent(self, settings_content=None):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -314,6 +325,101 @@ class PermissionGateTests(unittest.TestCase):
                 important_args=args,
                 approval_token=token,
             )
+
+    def test_patch_applier_requires_approval_and_does_not_modify_without_it(self):
+        agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
+        target = agent.base_dir / "main.py"
+        original = "hola\n"
+        updated = "adios\n"
+        target.write_bytes(original.encode("utf-8"))
+        args = self._patch_args("main.py", original, updated)
+
+        request = agent.create_operation_approval_request("patch_applier", "apply_patch", args)
+
+        self.assertIsNotNone(request)
+        self.assertEqual(set(request["important_args"].keys()), {"path", "old_sha256", "new_sha256", "old_bytes", "new_bytes"})
+        self.assertNotIn("old_content", request["important_args"])
+        self.assertNotIn("new_content", request["important_args"])
+
+        with self.assertRaises(PermissionError):
+            agent.execute_tool(
+                "patch_applier",
+                lambda: agent.patch_applier.apply_patch("main.py", original, updated),
+                action_name="apply_patch",
+                important_args=args,
+            )
+
+        self.assertEqual(target.read_text(encoding="utf-8"), original)
+
+    def test_patch_applier_exact_approval_modifies_once(self):
+        agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
+        target = agent.base_dir / "main.py"
+        original = "hola\n"
+        updated = "adios\n"
+        target.write_bytes(original.encode("utf-8"))
+        args = self._patch_args("main.py", original, updated)
+        request = agent.create_operation_approval_request("patch_applier", "apply_patch", args)
+        token = agent.permission_manager.grant_approval(request["request_id"])
+
+        result = agent.execute_tool(
+            "patch_applier",
+            lambda: agent.patch_applier.apply_patch("main.py", original, updated),
+            action_name="apply_patch",
+            important_args=args,
+            approval_token=token,
+        )
+
+        self.assertTrue(result["aplicado"])
+        self.assertEqual(target.read_text(encoding="utf-8"), updated)
+
+        with self.assertRaises(PermissionError):
+            agent.execute_tool(
+                "patch_applier",
+                lambda: agent.patch_applier.apply_patch("main.py", original, updated),
+                action_name="apply_patch",
+                important_args=args,
+                approval_token=token,
+            )
+
+    def test_patch_applier_changed_fingerprint_values_invalidate_approval(self):
+        agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
+        target = agent.base_dir / "main.py"
+        original = "hola\n"
+        updated = "adios\n"
+        target.write_bytes(original.encode("utf-8"))
+        args = self._patch_args("main.py", original, updated)
+        request = agent.create_operation_approval_request("patch_applier", "apply_patch", args)
+        token = agent.permission_manager.grant_approval(request["request_id"])
+
+        mismatches = [
+            {"path": "otro.py", "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": "0" * 64, "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": "1" * 64, "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"] + 1, "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"] + 1},
+        ]
+
+        for mismatch in mismatches:
+            with self.subTest(mismatch=mismatch):
+                with self.assertRaises(PermissionError):
+                    agent.execute_tool(
+                        "patch_applier",
+                        lambda: agent.patch_applier.apply_patch("main.py", original, updated),
+                        action_name="apply_patch",
+                        important_args=mismatch,
+                        approval_token=token,
+                    )
+
+        self.assertEqual(
+            agent.execute_tool(
+                "patch_applier",
+                lambda: agent.patch_applier.apply_patch("main.py", original, updated),
+                action_name="apply_patch",
+                important_args=args,
+                approval_token=token,
+            )["archivo"],
+            "main.py",
+        )
 
 
 if __name__ == "__main__":

@@ -16,6 +16,30 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIn("code_analyzer", plan)
         self.assertIn("code_reader", plan)
 
+    def test_planner_selects_patch_applier_only_for_explicit_apply_commands(self):
+        planner = Planner()
+
+        positive_cases = [
+            "aplica cambio main.py | nuevo | viejo",
+            "aplica el cambio main.py | nuevo | viejo",
+        ]
+
+        negative_cases = [
+            "explica cómo aplica cambios",
+            "propón un cambio",
+            "crea un patch",
+            "cambio en archivo",
+            "aplica parche",
+        ]
+
+        for message in positive_cases:
+            with self.subTest(message=message):
+                self.assertEqual(planner.plan(message), ["patch_generator", "patch_applier"])
+
+        for message in negative_cases:
+            with self.subTest(message=message):
+                self.assertNotIn("patch_applier", planner.plan(message))
+
     def test_planner_selects_file_creator_only_for_explicit_create_commands(self):
         planner = Planner()
 
@@ -93,6 +117,87 @@ class PlannerRouterTests(unittest.TestCase):
                     with self.subTest(message=message):
                         result = router.dispatch(["file_creator"], message)
                         self.assertIsInstance(result, str)
+
+            execute_tool.assert_not_called()
+
+    def test_router_dispatches_patch_applier_with_exact_separator_and_hashed_args(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            agent = DeveloperAgent(
+                client=None,
+                memory_file=temp_dir / "memory.json",
+                prompt_dir="prompts",
+                base_dir=temp_dir,
+                action_log_file=temp_dir / "agent_actions.json",
+            )
+            router = ToolRouter(agent)
+            old_content = "hola\n"
+            new_content = "adios\n"
+            old_bytes = old_content.encode("utf-8")
+            new_bytes = new_content.encode("utf-8")
+            expected_args = {
+                "path": "main.py",
+                "old_sha256": hashlib.sha256(old_bytes).hexdigest(),
+                "new_sha256": hashlib.sha256(new_bytes).hexdigest(),
+                "old_bytes": len(old_bytes),
+                "new_bytes": len(new_bytes),
+            }
+
+            with mock.patch.object(agent, "execute_tool", return_value={"archivo": "main.py", "actualizado": True, "backup": "main.py.backup", "bytes": len(new_bytes), "aplicado": True}) as execute_tool:
+                result = router.dispatch(["patch_applier"], "aplica cambio main.py | adios\n | hola\n")
+
+            self.assertTrue(result["actualizado"])
+            execute_tool.assert_called_once()
+            args, kwargs = execute_tool.call_args
+            self.assertEqual(args[0], "patch_applier")
+            self.assertEqual(kwargs["action_name"], "apply_patch")
+            self.assertEqual(kwargs["important_args"], expected_args)
+
+    def test_router_dispatches_patch_applier_for_aplica_el_cambio(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            agent = DeveloperAgent(
+                client=None,
+                memory_file=temp_dir / "memory.json",
+                prompt_dir="prompts",
+                base_dir=temp_dir,
+                action_log_file=temp_dir / "agent_actions.json",
+            )
+            router = ToolRouter(agent)
+
+            with mock.patch.object(agent, "execute_tool", return_value={"archivo": "main.py", "actualizado": True, "backup": "main.py.backup", "bytes": 4, "aplicado": True}) as execute_tool:
+                router.dispatch(["patch_applier"], "aplica el cambio main.py | nuevo | viejo")
+
+            execute_tool.assert_called_once()
+
+    def test_router_rejects_malformed_patch_commands(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_dir = Path(tmpdir)
+            agent = DeveloperAgent(
+                client=None,
+                memory_file=temp_dir / "memory.json",
+                prompt_dir="prompts",
+                base_dir=temp_dir,
+                action_log_file=temp_dir / "agent_actions.json",
+            )
+            router = ToolRouter(agent)
+
+            malformed_messages = [
+                "aplica cambio main.py|nuevo|viejo",
+                "aplica cambio main.py | nuevo | ",
+                "aplica cambio  | nuevo | viejo",
+                "aplica cambio",
+                "comando sin separadores completos",
+            ]
+
+            with mock.patch.object(agent, "execute_tool") as execute_tool:
+                for message in malformed_messages:
+                    with self.subTest(message=message):
+                        result = router.dispatch(["patch_applier"], message)
+                        if message.startswith("aplica"):
+                            self.assertIsInstance(result, str)
+                        else:
+                            self.assertIsNone(result)
 
             execute_tool.assert_not_called()
 

@@ -1,4 +1,5 @@
 import hashlib
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from brain.approval_controller import (
     parse_approval_command,
     sanitize_important_args,
 )
+from brain.patch_request import build_patch_approval_args
 
 
 class ApprovalControllerTests(unittest.TestCase):
@@ -69,6 +71,24 @@ class ApprovalControllerTests(unittest.TestCase):
             description="op",
         )
         return pending
+
+    def _build_patch_temp_agent(self, old_content="hola\n"):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        temp_dir = Path(tmpdir.name)
+        config_dir = temp_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "settings.json").write_text('{"medium_risk_requires_confirmation": false}', encoding="utf-8")
+        target = temp_dir / "main.py"
+        target.write_bytes(old_content.encode("utf-8"))
+        agent = DeveloperAgent(
+            client=None,
+            memory_file=temp_dir / "memory.json",
+            prompt_dir="prompts",
+            base_dir=temp_dir,
+            action_log_file=temp_dir / "agent_actions.json",
+        )
+        return temp_dir, target, agent, ConversationalController(agent)
 
     def test_request_operation_creates_pending_operation(self):
         agent = self._build_agent()
@@ -391,6 +411,84 @@ class ApprovalControllerTests(unittest.TestCase):
 
         out = conv.process_message("aplica cambio main.py | nuevo | viejo")
         self.assertIn("Se requiere aprobación", out)
+
+    def test_manual_patch_request_shows_exact_fingerprint_fields(self):
+        temp_dir, target, agent, conv = self._build_patch_temp_agent(old_content="hola\n")
+        self.assertEqual(target.read_text(encoding="utf-8"), "hola\n")
+
+        response = conv.process_message("aplica cambio main.py | adios\n | hola\n")
+        match = re.search(r"Solicitud: ([0-9a-f\-]{36})", response)
+        self.assertIsNotNone(match)
+        request_id = match.group(1)
+
+        expected_args = build_patch_approval_args("main.py", "hola\n", "adios\n")
+        pending = conv.approval_controller.get_pending(request_id)
+
+        self.assertIn("path", response)
+        self.assertIn("old_sha256", response)
+        self.assertIn("new_sha256", response)
+        self.assertIn("old_bytes", response)
+        self.assertIn("new_bytes", response)
+        self.assertIn(expected_args["old_sha256"], response)
+        self.assertIn(expected_args["new_sha256"], response)
+        self.assertIn(str(expected_args["old_bytes"]), response)
+        self.assertIn(str(expected_args["new_bytes"]), response)
+        self.assertNotIn("old_content", response)
+        self.assertNotIn("new_content", response)
+        self.assertEqual(target.read_text(encoding="utf-8"), "hola\n")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.tool_name, "patch_applier")
+        self.assertEqual(pending.action_name, "apply_patch")
+        self.assertEqual(agent.permission_manager.get_risk_level("patch_applier", action_name="apply_patch"), "high")
+
+    def test_manual_patch_request_approval_executes_once_and_exhausts_token(self):
+        temp_dir, target, agent, conv = self._build_patch_temp_agent(old_content="hola\n")
+        response = conv.process_message("aplica cambio main.py | adios\n | hola\n")
+        request_id = re.search(r"Solicitud: ([0-9a-f\-]{36})", response).group(1)
+
+        approved = conv.process_message(f"aprobar {request_id}")
+        self.assertIn("Operación aprobada y ejecutada correctamente.", approved)
+        self.assertEqual(target.read_text(encoding="utf-8"), "adios\n")
+        self.assertIsNone(conv.approval_controller.get_pending(request_id))
+        self.assertIsNone(agent.permission_manager.grant_approval(request_id))
+
+        repeat = conv.process_message(f"aprobar {request_id}")
+        self.assertIn("No existe una solicitud pendiente con ese identificador.", repeat)
+        self.assertEqual(target.read_text(encoding="utf-8"), "adios\n")
+
+    def test_patch_approval_token_invalidates_on_fingerprint_change(self):
+        agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
+        args = build_patch_approval_args("main.py", "hola\n", "adios\n")
+        request = agent.create_operation_approval_request("patch_applier", "apply_patch", args)
+        token = agent.permission_manager.grant_approval(request["request_id"])
+
+        invalid_variants = [
+            {"path": "other.py", "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": "0" * 64, "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": "1" * 64, "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"] + 1, "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"] + 1},
+        ]
+
+        for variant in invalid_variants:
+            with self.subTest(variant=variant):
+                self.assertFalse(
+                    agent.permission_manager.can_execute(
+                        "patch_applier",
+                        action_name="apply_patch",
+                        important_args=variant,
+                        approval_token=token,
+                    )
+                )
+
+        self.assertTrue(
+            agent.permission_manager.can_execute(
+                "patch_applier",
+                action_name="apply_patch",
+                important_args=args,
+                approval_token=token,
+            )
+        )
 
     def test_medium_operation_does_not_run_before_approval_when_enabled(self):
         agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": true}')

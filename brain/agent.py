@@ -17,6 +17,7 @@ from brain.execution_engine import ExecutionEngine
 from brain.memory_manager import MemoryManager
 from brain.permission_manager import PermissionManager
 from brain.planner import Planner
+from brain.patch_request import build_patch_approval_args, parse_patch_command
 from brain.tool_router import ToolRouter
 from tools.registry import build_default_registry
 
@@ -270,21 +271,21 @@ class DeveloperAgent:
 
         if text.lower().startswith("aplica cambio ") or text.lower().startswith("aplica el cambio "):
             try:
-                target = text.split(maxsplit=2)[2].strip()
-            except IndexError:
+                parsed = parse_patch_command(message)
+            except ValueError:
                 return "Formato esperado: 'Aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
 
-            parts = target.split(" | ", 2)
-            if len(parts) != 3:
-                return "Formato esperado: 'Aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
+            if parsed is None:
+                return None
 
-            relative_path, new_content, old_content = parts
+            relative_path, new_content, old_content = parsed
             try:
+                approval_args = build_patch_approval_args(relative_path, old_content, new_content)
                 result = self.execute_tool(
                     "patch_applier",
                     lambda: self.patch_applier.apply_patch(relative_path, old_content, new_content),
                     action_name="apply_patch",
-                    important_args={"path": relative_path},
+                    important_args=approval_args,
                 )
                 test_report = self.execute_tool(
                     "test_runner",

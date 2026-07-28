@@ -145,6 +145,61 @@ class PermissionManagerTests(unittest.TestCase):
             )
         )
 
+    def test_patch_applier_token_is_bound_to_path_hash_and_size(self):
+        registry = ToolRegistry()
+        registry.register("patch_applier", "Apply patch", True, risk="high")
+        manager = PermissionManager(registry=registry)
+
+        old_content = "hola\n"
+        new_content = "adios\n"
+        old_bytes = old_content.encode("utf-8")
+        new_bytes = new_content.encode("utf-8")
+        args = {
+            "path": "main.py",
+            "old_sha256": hashlib.sha256(old_bytes).hexdigest(),
+            "new_sha256": hashlib.sha256(new_bytes).hexdigest(),
+            "old_bytes": len(old_bytes),
+            "new_bytes": len(new_bytes),
+        }
+        request = manager.create_approval_request("patch_applier", "apply_patch", args)
+        token = manager.grant_approval(request["request_id"])
+
+        invalid_variants = [
+            {"path": "otro.py", **{k: v for k, v in args.items() if k != "path"}},
+            {"path": args["path"], "old_sha256": "0" * 64, "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": "1" * 64, "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"] + 1, "new_bytes": args["new_bytes"]},
+            {"path": args["path"], "old_sha256": args["old_sha256"], "new_sha256": args["new_sha256"], "old_bytes": args["old_bytes"], "new_bytes": args["new_bytes"] + 1},
+        ]
+
+        for variant in invalid_variants:
+            with self.subTest(variant=variant):
+                self.assertFalse(
+                    manager.can_execute(
+                        "patch_applier",
+                        action_name="apply_patch",
+                        important_args=variant,
+                        approval_token=token,
+                    )
+                )
+
+        self.assertTrue(
+            manager.can_execute(
+                "patch_applier",
+                action_name="apply_patch",
+                important_args=args,
+                approval_token=token,
+            )
+        )
+        self.assertFalse(
+            manager.can_execute(
+                "patch_applier",
+                action_name="apply_patch",
+                important_args=args,
+                approval_token=token,
+            )
+        )
+
     def test_token_with_wrong_action_is_rejected_and_not_consumed(self):
         registry = ToolRegistry()
         registry.register("patch_applier", "Apply patch", True, risk="high")

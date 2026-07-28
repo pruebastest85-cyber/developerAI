@@ -6,6 +6,11 @@ FILE_COMMAND_PREFIXES = (
     ("crear", "archivo"),
 )
 
+PATCH_COMMAND_PREFIXES = (
+    ("aplica", "cambio"),
+    ("aplica", "el", "cambio"),
+)
+
 TEST_COMMAND_PREFIXES = (
     ("prueba",),
     ("pruebas",),
@@ -41,7 +46,7 @@ class Planner:
         if any(keyword in text for keyword in ["git", "checkpoint", "rollback"]):
             return ["git_tools"]
 
-        if any(keyword in text for keyword in ["cambio", "patch", "propón", "propone", "aplica"]):
+        if self._matches_patch_command(words):
             return ["patch_generator", "patch_applier"]
 
         if any(keyword in text for keyword in ["dónde está", "donde esta", "ubicación", "archivo"]):
@@ -69,6 +74,19 @@ class Planner:
             return False
 
         for prefix in TEST_COMMAND_PREFIXES:
+            if len(words) < len(prefix):
+                continue
+            if tuple(words[: len(prefix)]) == prefix:
+                return True
+
+        return False
+
+    @staticmethod
+    def _matches_patch_command(words):
+        if not words:
+            return False
+
+        for prefix in PATCH_COMMAND_PREFIXES:
             if len(words) < len(prefix):
                 continue
             if tuple(words[: len(prefix)]) == prefix:
