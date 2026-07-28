@@ -14,6 +14,38 @@ class PlannerRouterTests(unittest.TestCase):
         self.assertIn("code_analyzer", plan)
         self.assertIn("code_reader", plan)
 
+    def test_planner_selects_test_runner_only_for_explicit_test_commands(self):
+        planner = Planner()
+
+        positive_cases = [
+            "prueba",
+            "pruebas",
+            "ejecutar pruebas",
+            "ejecuta pruebas",
+            "ejecutar tests",
+            "ejecuta tests",
+            "run tests",
+        ]
+
+        negative_cases = [
+            "Crea prueba_aprobacion.txt",
+            'Escribe el texto "prueba"',
+            "Crea una prueba unitaria",
+            "Explica los tests",
+            "Abre tests/test_agent.py",
+            "ejecuta este cambio",
+            "testimonio",
+        ]
+
+        for message in positive_cases:
+            with self.subTest(message=message):
+                self.assertEqual(planner.plan(message), ["test_runner"])
+
+        for message in negative_cases:
+            with self.subTest(message=message):
+                self.assertNotEqual(planner.plan(message), ["test_runner"])
+                self.assertNotIn("test_runner", planner.plan(message))
+
     def test_router_dispatches_to_memory_tool(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_dir = Path(tmpdir)

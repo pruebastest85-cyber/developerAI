@@ -1,6 +1,17 @@
 from tools.registry import build_default_registry
 
 
+TEST_COMMAND_PREFIXES = (
+    ("prueba",),
+    ("pruebas",),
+    ("ejecutar", "pruebas"),
+    ("ejecuta", "pruebas"),
+    ("ejecutar", "tests"),
+    ("ejecuta", "tests"),
+    ("run", "tests"),
+)
+
+
 class Planner:
     def __init__(self, tools=None, registry=None):
         self.tools = tools or {}
@@ -8,6 +19,7 @@ class Planner:
 
     def plan(self, message):
         text = message.lower().strip()
+        words = text.split()
 
         if any(keyword in text for keyword in ["analiza", "explica", "explícame"]):
             return ["code_analyzer", "code_reader"]
@@ -15,7 +27,7 @@ class Planner:
         if any(keyword in text for keyword in ["recuerda", "memoria", "recuerdo"]):
             return ["memory"]
 
-        if any(keyword in text for keyword in ["prueba", "test", "tests", "ejecuta"]):
+        if self._matches_test_command(words):
             return ["test_runner"]
 
         if any(keyword in text for keyword in ["git", "checkpoint", "rollback"]):
@@ -31,3 +43,16 @@ class Planner:
 
     def available_tools(self):
         return self.registry.list()
+
+    @staticmethod
+    def _matches_test_command(words):
+        if not words:
+            return False
+
+        for prefix in TEST_COMMAND_PREFIXES:
+            if len(words) < len(prefix):
+                continue
+            if tuple(words[: len(prefix)]) == prefix:
+                return True
+
+        return False
