@@ -9,6 +9,7 @@ class PermissionManager:
         ("git_tools", "checkpoint"): "high",
         ("git_tools", "rollback"): "high",
         ("patch_applier", "apply_patch"): "high",
+        ("file_creator", "create_file"): "high",
     }
 
     def __init__(self, registry=None, medium_requires_confirmation=False, fail_closed=True):

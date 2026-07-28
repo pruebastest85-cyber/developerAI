@@ -1,6 +1,11 @@
 from tools.registry import build_default_registry
 
 
+FILE_COMMAND_PREFIXES = (
+    ("crea", "archivo"),
+    ("crear", "archivo"),
+)
+
 TEST_COMMAND_PREFIXES = (
     ("prueba",),
     ("pruebas",),
@@ -20,6 +25,9 @@ class Planner:
     def plan(self, message):
         text = message.lower().strip()
         words = text.split()
+
+        if self._matches_file_command(words):
+            return ["file_creator"]
 
         if any(keyword in text for keyword in ["analiza", "explica", "explícame"]):
             return ["code_analyzer", "code_reader"]
@@ -43,6 +51,17 @@ class Planner:
 
     def available_tools(self):
         return self.registry.list()
+
+    @staticmethod
+    def _matches_file_command(words):
+        if len(words) < 2:
+            return False
+
+        for prefix in FILE_COMMAND_PREFIXES:
+            if tuple(words[: len(prefix)]) == prefix:
+                return True
+
+        return False
 
     @staticmethod
     def _matches_test_command(words):

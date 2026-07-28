@@ -32,6 +32,7 @@ def build_default_registry():
     registry.register("code_analyzer", "Analiza la estructura de archivos Python", False, risk="low")
     registry.register("patch_generator", "Genera propuestas de cambio en formato diff", True, risk="medium")
     registry.register("patch_applier", "Aplica cambios aprobados de forma segura", True, risk="high")
+    registry.register("file_creator", "Crea archivos nuevos de forma segura", True, risk="high")
     registry.register("test_runner", "Ejecuta pruebas del proyecto", False, risk="medium")
     registry.register("git_tools", "Gestiona checkpoints y rollback de Git", True, risk="high")
     registry.register("memory", "Gestiona recuerdos y memoria persistente", False, risk="low")

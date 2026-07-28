@@ -15,6 +15,7 @@ class RegistryTests(unittest.TestCase):
         registry = build_default_registry()
         self.assertIn("code_reader", registry.names())
         self.assertIn("test_runner", registry.names())
+        self.assertIn("file_creator", registry.names())
 
     def test_registry_can_store_tool_instance(self):
         class DemoTool(Tool):

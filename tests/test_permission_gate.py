@@ -11,6 +11,14 @@ class PermissionGateTests(unittest.TestCase):
     def _sha256(self, file_path):
         return hashlib.sha256(file_path.read_bytes()).hexdigest()
 
+    def _file_creator_args(self, relative_path, content):
+        content_bytes = content.encode("utf-8")
+        return {
+            "path": relative_path,
+            "content_sha256": hashlib.sha256(content_bytes).hexdigest(),
+            "content_bytes": len(content_bytes),
+        }
+
     def _build_agent(self, settings_content=None):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -259,6 +267,53 @@ class PermissionGateTests(unittest.TestCase):
 
         self.assertEqual(memory_before, self._sha256(real_memory))
         self.assertEqual(logs_before, self._sha256(real_logs))
+
+    def test_file_creator_requires_approval_and_does_not_create_without_it(self):
+        agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
+        (agent.base_dir / "notas").mkdir(parents=True, exist_ok=True)
+        target = agent.base_dir / "notas" / "hola.txt"
+        args = self._file_creator_args("notas/hola.txt", "Hola mundo")
+
+        request = agent.create_operation_approval_request("file_creator", "create_file", args)
+
+        self.assertIsNotNone(request)
+        with self.assertRaises(PermissionError):
+            agent.execute_tool(
+                "file_creator",
+                lambda: agent.file_creator.create_file("notas/hola.txt", "Hola mundo"),
+                action_name="create_file",
+                important_args=args,
+            )
+        self.assertFalse(target.exists())
+
+    def test_file_creator_exact_approval_creates_once(self):
+        agent = self._build_agent(settings_content='{"medium_risk_requires_confirmation": false}')
+        (agent.base_dir / "notas").mkdir(parents=True, exist_ok=True)
+        target = agent.base_dir / "notas" / "hola.txt"
+        content = "Hola mundo"
+        args = self._file_creator_args("notas/hola.txt", content)
+        request = agent.create_operation_approval_request("file_creator", "create_file", args)
+        token = agent.permission_manager.grant_approval(request["request_id"])
+
+        result = agent.execute_tool(
+            "file_creator",
+            lambda: agent.file_creator.create_file("notas/hola.txt", content),
+            action_name="create_file",
+            important_args=args,
+            approval_token=token,
+        )
+
+        self.assertEqual(result["archivo"], "notas/hola.txt")
+        self.assertEqual(target.read_text(encoding="utf-8"), content)
+
+        with self.assertRaises(PermissionError):
+            agent.execute_tool(
+                "file_creator",
+                lambda: agent.file_creator.create_file("notas/hola.txt", content),
+                action_name="create_file",
+                important_args=args,
+                approval_token=token,
+            )
 
 
 if __name__ == "__main__":

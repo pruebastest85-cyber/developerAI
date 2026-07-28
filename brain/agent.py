@@ -6,6 +6,7 @@ from memory.memory import agregar_recuerdo, leer_memoria
 from tools.action_logger import ActionLogger
 from tools.code_analyzer import CodeAnalyzer
 from tools.code_reader import CodeReader
+from tools.file_creator import FileCreator
 from tools.git_tools import GitTools
 from tools.patch_applier import PatchApplier
 from tools.patch_generator import PatchGenerator
@@ -34,6 +35,7 @@ class DeveloperAgent:
         self.code_analyzer = CodeAnalyzer(base_dir=self.base_dir)
         self.patch_generator = PatchGenerator(base_dir=self.base_dir)
         self.patch_applier = PatchApplier(base_dir=self.base_dir)
+        self.file_creator = FileCreator(base_dir=self.base_dir)
         self.test_runner = TestRunner(base_dir=self.base_dir)
         self.git_tools = GitTools(base_dir=self.base_dir)
         self.action_logger = ActionLogger(log_file=action_log_file)
@@ -41,6 +43,7 @@ class DeveloperAgent:
         self.planner = Planner()
         self.memory_manager = MemoryManager(memory_file=self.memory_file)
         self.registry = build_default_registry()
+        self.registry.register("file_creator", "Crea archivos nuevos de forma segura", True, tool_instance=self.file_creator, risk="high")
         self.permission_manager = PermissionManager(
             registry=self.registry,
             medium_requires_confirmation=self._read_medium_risk_policy(),

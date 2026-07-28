@@ -1,3 +1,5 @@
+import hashlib
+
 from brain.approval_controller import ApprovalRequiredError
 
 
@@ -49,6 +51,52 @@ class ToolRouter:
                     lambda: self.agent.test_runner.run_tests_report(),
                     action_name="run_tests_report",
                     important_args={"scope": "default"},
+                )
+            except ApprovalRequiredError:
+                raise
+            except PermissionError as exc:
+                return str(exc)
+
+        if "file_creator" in plan:
+            command = message.lstrip()
+            lower_command = command.lower()
+            prefix = None
+            for candidate in ("crea archivo", "crear archivo"):
+                if lower_command == candidate or lower_command.startswith(candidate + " "):
+                    prefix = candidate
+                    break
+
+            if prefix is None:
+                return None
+
+            remainder = command[len(prefix):]
+            if not remainder.startswith(" "):
+                return "Formato esperado: 'crea archivo <ruta> | <contenido>'"
+
+            payload = remainder[1:]
+            parts = payload.split(" | ", 1)
+            if len(parts) != 2:
+                return "Formato esperado: 'crea archivo <ruta> | <contenido>'"
+
+            relative_path, content = parts
+            relative_path = relative_path.strip()
+            if not relative_path or content == "":
+                return "Formato esperado: 'crea archivo <ruta> | <contenido>'"
+
+            encoded_content = content.encode("utf-8")
+            content_sha256 = hashlib.sha256(encoded_content).hexdigest()
+            content_bytes = len(encoded_content)
+
+            try:
+                return self.agent.execute_tool(
+                    "file_creator",
+                    lambda: self.agent.file_creator.create_file(relative_path, content),
+                    action_name="create_file",
+                    important_args={
+                        "path": relative_path,
+                        "content_sha256": content_sha256,
+                        "content_bytes": content_bytes,
+                    },
                 )
             except ApprovalRequiredError:
                 raise

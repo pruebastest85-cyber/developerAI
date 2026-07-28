@@ -1,4 +1,5 @@
 import unittest
+import hashlib
 
 from brain.permission_manager import PermissionManager
 from tools.registry import ToolRegistry
@@ -165,6 +166,62 @@ class PermissionManagerTests(unittest.TestCase):
                 "patch_applier",
                 action_name="apply_patch",
                 important_args={"path": "main.py"},
+                approval_token=token,
+            )
+        )
+
+    def test_file_creator_token_is_bound_to_path_hash_and_size(self):
+        registry = ToolRegistry()
+        registry.register("file_creator", "Create file", True, risk="high")
+        manager = PermissionManager(registry=registry)
+
+        content = "Hola ñ🙂"
+        encoded = content.encode("utf-8")
+        args = {
+            "path": "notas/hola.txt",
+            "content_sha256": hashlib.sha256(encoded).hexdigest(),
+            "content_bytes": len(encoded),
+        }
+        request = manager.create_approval_request("file_creator", "create_file", args)
+        token = manager.grant_approval(request["request_id"])
+
+        self.assertFalse(
+            manager.can_execute(
+                "file_creator",
+                action_name="create_file",
+                important_args={"path": "notas/otro.txt", "content_sha256": args["content_sha256"], "content_bytes": args["content_bytes"]},
+                approval_token=token,
+            )
+        )
+        self.assertFalse(
+            manager.can_execute(
+                "file_creator",
+                action_name="create_file",
+                important_args={"path": args["path"], "content_sha256": "0" * 64, "content_bytes": args["content_bytes"]},
+                approval_token=token,
+            )
+        )
+        self.assertFalse(
+            manager.can_execute(
+                "file_creator",
+                action_name="create_file",
+                important_args={"path": args["path"], "content_sha256": args["content_sha256"], "content_bytes": args["content_bytes"] + 1},
+                approval_token=token,
+            )
+        )
+        self.assertTrue(
+            manager.can_execute(
+                "file_creator",
+                action_name="create_file",
+                important_args=args,
+                approval_token=token,
+            )
+        )
+        self.assertFalse(
+            manager.can_execute(
+                "file_creator",
+                action_name="create_file",
+                important_args=args,
                 approval_token=token,
             )
         )
