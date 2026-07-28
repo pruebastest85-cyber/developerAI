@@ -7,6 +7,7 @@ from brain.approval_controller import ApprovalRequiredError, ConversationalContr
 from brain.execution_engine import ExecutionEngine
 from brain.execution_state import ExecutionState
 from brain.reflection_engine import ReflectionEngine
+from tools.tool_result import ToolResult
 
 
 class ExecutionEngineTests(unittest.TestCase):
@@ -38,7 +39,10 @@ class ExecutionEngineTests(unittest.TestCase):
 
     def test_execute_plan_returns_structured_report(self):
         agent = self._build_agent()
-        agent.test_runner.run_tests_report = lambda: "tests-ok"
+        agent.test_runner.execute = lambda: ToolResult.success(
+            "test_runner",
+            message="tests-ok",
+        )
         engine = ExecutionEngine(agent)
 
         result = engine.run("Analiza el proyecto y dime por qué falla")
@@ -406,6 +410,51 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertEqual(result["Estado"], "failed")
         self.assertEqual(result["State"]["failed_steps"][0]["step"], "legacy")
 
+    def test_partial_tool_result_never_completes(self):
+        agent = self._build_agent()
+
+        class PartialEngine(ExecutionEngine):
+            def build_plan(self, message):
+                return [{"name": "partial"}]
+
+            def _run_step(self, step, message):
+                return self._tool_step_result(
+                    "partial",
+                    ToolResult.incomplete(
+                        "demo",
+                        data={"items": [1]},
+                        retryable=True,
+                    ),
+                )
+
+        result = PartialEngine(agent).run("inspect")
+
+        self.assertEqual(result["Estado"], "failed")
+        failure = result["State"]["failed_steps"][0]["error"]
+        self.assertEqual(failure["status"], "partial")
+        self.assertTrue(failure["retryable"])
+        self.assertEqual(result["State"]["retries"], 0)
+
+    def test_failed_tool_result_feeds_record_failure(self):
+        agent = self._build_agent()
+
+        class FailedEngine(ExecutionEngine):
+            def build_plan(self, message):
+                return [{"name": "failed"}]
+
+            def _run_step(self, step, message):
+                return self._tool_step_result(
+                    "failed",
+                    ToolResult.failure("demo", error="boom"),
+                )
+
+        result = FailedEngine(agent).run("inspect")
+
+        self.assertEqual(result["Estado"], "failed")
+        failure = result["State"]["failed_steps"][0]["error"]
+        self.assertEqual(failure["status"], "failed")
+        self.assertEqual(failure["error"], "boom")
+
     def test_non_replannable_failure_finishes_as_failed(self):
         agent = self._build_agent()
 
@@ -537,6 +586,31 @@ class ExecutionEngineTests(unittest.TestCase):
 
         self.assertEqual(result["Estado"], "completed")
         self.assertTrue(result["State"]["finished"])
+
+    def test_partial_flows_from_agent_execute_tool_into_execution_engine(self):
+        agent = self._build_agent()
+
+        class AgentPartialEngine(ExecutionEngine):
+            def build_plan(self, message):
+                return [{"name": "agent_partial"}]
+
+            def _run_step(self, step, message):
+                result = self.agent.execute_tool(
+                    "code_reader",
+                    lambda: ToolResult.incomplete(
+                        "code_reader",
+                        data={"read": 2},
+                        message="partial read",
+                    ),
+                    structured=True,
+                )
+                return self._tool_step_result(step["name"], result)
+
+        result = AgentPartialEngine(agent).run("inspect")
+
+        self.assertEqual(result["Estado"], "failed")
+        self.assertEqual(result["State"]["failed_steps"][0]["error"]["status"], "partial")
+        self.assertEqual(result["State"]["retries"], 0)
 
 
 if __name__ == "__main__":

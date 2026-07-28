@@ -3,11 +3,14 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from tools.tool_result import ToolResult, execute_and_normalize, legacy_tool_value
+
 
 MAX_CONTENT_BYTES = 1024 * 1024
 
 
 class PatchApplier:
+    name = "patch_applier"
     def __init__(self, base_dir=None):
         self.base_dir = Path(base_dir or ".").resolve()
 
@@ -115,3 +118,24 @@ class PatchApplier:
             "bytes": len(new_bytes),
             "aplicado": True,
         }
+
+    def execute(self, args=None, structured=False):
+        if not isinstance(args, dict) or any(
+            not isinstance(args.get(key), str)
+            for key in ("path", "old_content", "new_content")
+        ):
+            result = ToolResult.failure(
+                self.name,
+                error="path, old_content y new_content deben ser cadenas",
+            )
+            return result if structured else legacy_tool_value(result)
+        result = execute_and_normalize(
+            self.name,
+            lambda: self.apply_patch(
+                args["path"],
+                args["old_content"],
+                args["new_content"],
+            ),
+            operational_exceptions=(OSError, UnicodeError),
+        )
+        return result if structured else legacy_tool_value(result)

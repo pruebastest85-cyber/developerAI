@@ -29,12 +29,13 @@ class InternetSearchBackendTests(unittest.TestCase):
                 mock_urlopen.return_value = mock_response
 
                 tool = InternetSearchTool(settings_path=settings_path, logger=DummyLogger())
-                result = tool.execute({"query": "fastapi"})
+                result = tool.execute({"query": "fastapi"}, structured=True)
 
-                self.assertEqual(result["query"], "fastapi")
-                self.assertEqual(result["source"], "searxng")
-                self.assertEqual(len(result["results"]), 1)
-                self.assertEqual(result["results"][0]["title"], "FastAPI docs")
+                self.assertEqual(result.status, "ok")
+                self.assertEqual(result.data["query"], "fastapi")
+                self.assertEqual(result.data["source"], "searxng")
+                self.assertEqual(len(result.data["results"]), 1)
+                self.assertEqual(result.data["results"][0]["title"], "FastAPI docs")
 
     def test_local_endpoint_is_normalized_to_searxng_search_path(self):
         class DummyLogger:

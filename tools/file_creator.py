@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from tools.base_tool import Tool
+from tools.tool_result import ToolResult, execute_and_normalize, legacy_tool_value
 
 
 class FileCreator(Tool):
@@ -56,6 +57,16 @@ class FileCreator(Tool):
             "bytes": len(content_bytes),
         }
 
-    def execute(self, args=None):
-        payload = args or {}
-        return self.create_file(payload["path"], payload["content"])
+    def execute(self, args=None, structured=False):
+        if not isinstance(args, dict):
+            result = ToolResult.failure(self.name, error="Los argumentos deben ser un diccionario")
+            return result if structured else legacy_tool_value(result)
+        if not isinstance(args.get("path"), str) or not isinstance(args.get("content"), str):
+            result = ToolResult.failure(self.name, error="path y content deben ser cadenas")
+            return result if structured else legacy_tool_value(result)
+        result = execute_and_normalize(
+            self.name,
+            lambda: self.create_file(args["path"], args["content"]),
+            operational_exceptions=(OSError, UnicodeError),
+        )
+        return result if structured else legacy_tool_value(result)

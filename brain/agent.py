@@ -12,6 +12,12 @@ from tools.patch_applier import PatchApplier
 from tools.patch_generator import PatchGenerator
 from tools.project_scanner import buscar_en_indice
 from tools.test_runner import TestRunner
+from tools.tool_result import (
+    UNHANDLED,
+    execute_and_normalize,
+    legacy_tool_value,
+    present_tool_result,
+)
 from brain.context_manager import ContextManager
 from brain.execution_engine import ExecutionEngine
 from brain.memory_manager import MemoryManager
@@ -73,7 +79,18 @@ class DeveloperAgent:
             important_args=important_args,
         )
 
-    def execute_tool(self, tool_name, action, action_name="execute", important_args=None, approval_token=None):
+    def execute_tool(
+        self,
+        tool_name,
+        action,
+        action_name="execute",
+        important_args=None,
+        approval_token=None,
+        structured=False,
+        none_policy="ok",
+        operational_exceptions=(),
+        retryable=False,
+    ):
         allowed = self.permission_manager.can_execute(
             tool_name,
             action_name=action_name,
@@ -92,7 +109,14 @@ class DeveloperAgent:
                     message=message,
                 )
             raise PermissionError(message)
-        return action()
+        result = execute_and_normalize(
+            tool_name,
+            action,
+            none_policy=none_policy,
+            operational_exceptions=operational_exceptions,
+            retryable=retryable,
+        )
+        return result if structured else legacy_tool_value(result)
 
     def _initialize_history(self):
         self.history = [
@@ -219,12 +243,14 @@ class DeveloperAgent:
 
         if text.lower().startswith("prueba") or text.lower().startswith("ejecuta tests"):
             try:
-                return self.execute_tool(
+                result = self.execute_tool(
                     "test_runner",
-                    lambda: self.test_runner.run_tests_report(),
-                    action_name="run_tests_report",
+                    lambda: self.test_runner.execute(structured=True),
+                    action_name="run_tests",
                     important_args={"scope": "default"},
+                    structured=True,
                 )
+                return self._present_tool_result(result)
             except ApprovalRequiredError:
                 raise
             except PermissionError as exc:
@@ -326,9 +352,15 @@ class DeveloperAgent:
             parts.append("Errores:\n" + result["stderr"].strip())
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _present_tool_result(result):
+        return present_tool_result(result)
+
     def respond(self, message):
         memory_response = self.handle_memory(message)
-        if memory_response is not None:
+        if memory_response is None:
+            memory_response = UNHANDLED
+        if memory_response is not UNHANDLED:
             return memory_response
 
         plan = self.planner.plan(message)
@@ -339,7 +371,7 @@ class DeveloperAgent:
             return str(result)
 
         routed = self.tool_router.dispatch(plan, message)
-        if routed is not None:
+        if routed is not UNHANDLED:
             self.action_logger.log("router", params={"plan": plan, "message": message}, result="executed")
             return routed
 

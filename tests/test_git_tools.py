@@ -21,6 +21,23 @@ class GitToolsTests(unittest.TestCase):
             self.assertIn("stdout", result)
             self.assertIn("ok", result)
 
+    def test_execute_returns_failed_tool_result_for_nonzero_exit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tools = GitTools(base_dir=tmpdir)
+            tools.status = lambda: {
+                "command": "git status --short",
+                "returncode": 128,
+                "stdout": "",
+                "stderr": "not a repository",
+                "ok": False,
+            }
+
+            result = tools.execute({"action": "status"}, structured=True)
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.data["returncode"], 128)
+            self.assertEqual(result.error, "not a repository")
+
 
 if __name__ == "__main__":
     unittest.main()

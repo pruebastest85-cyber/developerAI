@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from tools.file_creator import FileCreator
+from tools.tool_result import ToolResult
 
 
 class FileCreatorTests(unittest.TestCase):
@@ -75,6 +76,37 @@ class FileCreatorTests(unittest.TestCase):
             content = "a" * 65537
             with self.assertRaises(ValueError):
                 creator.create_file("notas/hola.txt", content)
+
+    def test_execute_preserves_historical_default_and_supports_structured(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            creator = FileCreator(base_dir=base_dir)
+
+            historical = creator.execute({"path": "one.txt", "content": "one"})
+            structured = creator.execute(
+                {"path": "two.txt", "content": "two"},
+                structured=True,
+            )
+
+            self.assertIsInstance(historical, dict)
+            self.assertNotIn("status", historical)
+            self.assertIsInstance(structured, ToolResult)
+            self.assertEqual(structured.status, "ok")
+
+    def test_execute_validation_is_failed_but_internal_value_error_propagates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creator = FileCreator(base_dir=tmpdir)
+            validation = creator.execute({"path": 1}, structured=True)
+            self.assertEqual(validation.status, "failed")
+
+            creator.create_file = lambda path, content: (_ for _ in ()).throw(
+                ValueError("internal")
+            )
+            with self.assertRaises(ValueError):
+                creator.execute(
+                    {"path": "file.txt", "content": "value"},
+                    structured=True,
+                )
 
 
 if __name__ == "__main__":

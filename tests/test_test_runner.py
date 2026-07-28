@@ -27,6 +27,24 @@ class TestRunnerTests(unittest.TestCase):
         self.assertIn("stderr", result)
         self.assertIn("ok", result)
 
+    def test_execute_returns_failed_tool_result_for_nonzero_exit(self):
+        runner = TestRunner(base_dir=".")
+        result = runner.execute(
+            {
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('bad'); sys.exit(3)",
+                ]
+            },
+            structured=True,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertTrue(result.retryable)
+        self.assertEqual(result.data["returncode"], 3)
+        self.assertIn("Resultado: FALLÓ", result.message)
+
 
 if __name__ == "__main__":
     unittest.main()

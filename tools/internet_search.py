@@ -5,6 +5,7 @@ from urllib.request import Request, urlopen
 
 from tools.action_logger import ActionLogger
 from tools.base_tool import Tool
+from tools.tool_result import ToolResult, legacy_tool_value
 
 
 class InternetSearchTool(Tool):
@@ -18,19 +19,45 @@ class InternetSearchTool(Tool):
         self.endpoint = endpoint or self._load_endpoint_from_settings() or "https://searx.be/search"
         self.logger = logger or ActionLogger()
 
-    def execute(self, args=None):
+    def execute(self, args=None, structured=False):
         query = args.get("query", "") if isinstance(args, dict) else str(args or "")
-        if not query:
-            raise ValueError("Se requiere una consulta para buscar en internet")
+        if not isinstance(query, str) or not query.strip():
+            result = ToolResult.failure(
+                self.name,
+                error="Se requiere una consulta para buscar en internet",
+            )
+            return result if structured else legacy_tool_value(result)
+        query = query.strip()
 
-        url = self._build_url(query)
-        request = Request(url, headers={"User-Agent": "DeveloperAI/1.0"})
-        with urlopen(request, timeout=10) as response:
-            payload = response.read().decode("utf-8")
+        try:
+            url = self._build_url(query)
+            request = Request(url, headers={"User-Agent": "DeveloperAI/1.0"})
+            with urlopen(request, timeout=10) as response:
+                payload = response.read().decode("utf-8")
+            data = self._parse_result(payload, query)
+            result = ToolResult.success(
+                self.name,
+                data=data,
+                message=f"Se encontraron {len(data['results'])} resultados.",
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, UnexpectedSearchFormat) as exc:
+            result = ToolResult.failure(
+                self.name,
+                error=(
+                    f"Formato externo inesperado: {exc}"
+                    if isinstance(exc, UnexpectedSearchFormat)
+                    else str(exc)
+                ),
+                metadata={"exception_type": type(exc).__name__, "query": query},
+                retryable=isinstance(exc, OSError),
+            )
 
-        result = self._parse_result(payload, query)
-        self.logger.log(self.name, params={"query": query, "endpoint": self.endpoint}, result=result)
-        return result
+        self.logger.log(
+            self.name,
+            params={"query": query, "endpoint": self.endpoint},
+            result=result,
+        )
+        return result if structured else legacy_tool_value(result)
 
     def _build_url(self, query):
         encoded = quote_plus(query)
@@ -54,21 +81,32 @@ class InternetSearchTool(Tool):
         return endpoint if isinstance(endpoint, str) and endpoint.strip() else None
 
     def _parse_result(self, payload, query):
-        try:
-            data = json.loads(payload)
-            results = data.get("results", [])
-            return {
-                "query": query,
-                "source": "searxng",
-                "results": [{
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "snippet": item.get("content", "")
-                } for item in results[:5]]
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            raise UnexpectedSearchFormat("la raíz JSON debe ser un objeto")
+        results = data.get("results", [])
+        if not isinstance(results, list):
+            raise UnexpectedSearchFormat("results debe ser una lista")
+        normalized_results = []
+        for item in results[:5]:
+            if not isinstance(item, dict):
+                raise UnexpectedSearchFormat("cada resultado debe ser un objeto")
+            fields = {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("content", ""),
             }
-        except Exception:
-            return {
-                "query": query,
-                "source": "searxng",
-                "results": [{"title": "error", "url": "", "snippet": payload[:200]}],
-            }
+            if any(not isinstance(value, str) for value in fields.values()):
+                raise UnexpectedSearchFormat(
+                    "title, url y content deben ser cadenas"
+                )
+            normalized_results.append(fields)
+        return {
+            "query": query,
+            "source": "searxng",
+            "results": normalized_results,
+        }
+
+
+class UnexpectedSearchFormat(ValueError):
+    """The remote search service returned valid JSON with an unusable schema."""

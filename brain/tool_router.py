@@ -2,6 +2,7 @@ import hashlib
 
 from brain.approval_controller import ApprovalRequiredError
 from brain.patch_request import build_patch_approval_args, parse_patch_command
+from tools.tool_result import UNHANDLED, present_tool_result
 
 
 class ToolRouter:
@@ -10,7 +11,7 @@ class ToolRouter:
 
     def dispatch(self, plan, message):
         if not plan:
-            return None
+            return UNHANDLED
 
         if "code_analyzer" in plan:
             if message.lower().startswith(("analiza", "analizar")):
@@ -43,16 +44,19 @@ class ToolRouter:
                     return str(exc)
 
         if "memory" in plan:
-            return self.agent.handle_memory(message)
+            memory_result = self.agent.handle_memory(message)
+            return UNHANDLED if memory_result is None else memory_result
 
         if "test_runner" in plan:
             try:
-                return self.agent.execute_tool(
+                result = self.agent.execute_tool(
                     "test_runner",
-                    lambda: self.agent.test_runner.run_tests_report(),
-                    action_name="run_tests_report",
+                    lambda: self.agent.test_runner.execute(structured=True),
+                    action_name="run_tests",
                     important_args={"scope": "default"},
+                    structured=True,
                 )
+                return self._present_tool_result(result)
             except ApprovalRequiredError:
                 raise
             except PermissionError as exc:
@@ -68,7 +72,7 @@ class ToolRouter:
                     break
 
             if prefix is None:
-                return None
+                return UNHANDLED
 
             remainder = command[len(prefix):]
             if not remainder.startswith(" "):
@@ -107,36 +111,52 @@ class ToolRouter:
         if "git_tools" in plan:
             if "status" in message.lower():
                 try:
-                    return self.agent.execute_tool(
+                    result = self.agent.execute_tool(
                         "git_tools",
-                        lambda: self.agent._format_git_result(self.agent.git_tools.status()),
+                        lambda: self.agent.git_tools.execute(
+                            {"action": "status"}, structured=True
+                        ),
                         action_name="status",
                         important_args={"command": "git status --short"},
+                        structured=True,
                     )
+                    return self._present_tool_result(result)
                 except ApprovalRequiredError:
                     raise
                 except PermissionError as exc:
                     return str(exc)
             if "checkpoint" in message.lower():
                 try:
-                    return self.agent.execute_tool(
+                    result = self.agent.execute_tool(
                         "git_tools",
-                        lambda: self.agent._format_git_result(self.agent.git_tools.checkpoint()),
+                        lambda: self.agent.git_tools.execute(
+                            {
+                                "action": "checkpoint",
+                                "message": "Checkpoint before AI modification",
+                            },
+                            structured=True,
+                        ),
                         action_name="checkpoint",
                         important_args={"message": "Checkpoint before AI modification"},
+                        structured=True,
                     )
+                    return self._present_tool_result(result)
                 except ApprovalRequiredError:
                     raise
                 except PermissionError as exc:
                     return str(exc)
             if "rollback" in message.lower():
                 try:
-                    return self.agent.execute_tool(
+                    result = self.agent.execute_tool(
                         "git_tools",
-                        lambda: self.agent._format_git_result(self.agent.git_tools.rollback()),
+                        lambda: self.agent.git_tools.execute(
+                            {"action": "rollback"}, structured=True
+                        ),
                         action_name="rollback",
                         important_args={"target": "HEAD"},
+                        structured=True,
                     )
+                    return self._present_tool_result(result)
                 except ApprovalRequiredError:
                     raise
                 except PermissionError as exc:
@@ -173,7 +193,7 @@ class ToolRouter:
                 return "Formato esperado: 'aplica cambio <archivo> | <contenido nuevo> | <contenido anterior>'"
 
             if parsed is None:
-                return None
+                return UNHANDLED
 
             relative_path, new_content, old_content = parsed
 
@@ -191,4 +211,8 @@ class ToolRouter:
             except PermissionError as exc:
                 return str(exc)
 
-        return None
+        return UNHANDLED
+
+    @staticmethod
+    def _present_tool_result(result):
+        return present_tool_result(result)

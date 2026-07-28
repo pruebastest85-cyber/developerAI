@@ -7,9 +7,62 @@ from unittest import mock
 from brain.planner import Planner
 from brain.tool_router import ToolRouter
 from brain.agent import DeveloperAgent
+from tools.tool_result import ToolResult, UNHANDLED
 
 
 class PlannerRouterTests(unittest.TestCase):
+    def test_router_presents_tool_result_message(self):
+        result = ToolResult.failure(
+            "test_runner",
+            error="technical",
+            message="Pruebas fallidas",
+        )
+
+        self.assertEqual(
+            ToolRouter._present_tool_result(result),
+            "Pruebas fallidas\n\nError: technical",
+        )
+
+    def test_router_presentation_covers_message_error_and_data(self):
+        self.assertEqual(
+            ToolRouter._present_tool_result(
+                ToolResult.failure("demo", message="same", error="same")
+            ),
+            "same",
+        )
+        self.assertEqual(
+            ToolRouter._present_tool_result(
+                ToolResult.failure("demo", error="only error")
+            ),
+            "only error",
+        )
+        self.assertEqual(
+            ToolRouter._present_tool_result(
+                ToolResult.success("demo", data=["only data"])
+            ),
+            ["only data"],
+        )
+
+    def test_router_distinguishes_ok_none_from_unhandled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = DeveloperAgent(
+                client=None,
+                memory_file=Path(tmpdir) / "memory.json",
+                prompt_dir="prompts",
+                base_dir=tmpdir,
+                action_log_file=Path(tmpdir) / "actions.json",
+            )
+            with mock.patch.object(
+                agent,
+                "execute_tool",
+                return_value=ToolResult.success("test_runner", data=None),
+            ):
+                handled = agent.tool_router.dispatch(["test_runner"], "prueba")
+
+            unhandled = agent.tool_router.dispatch([], "unknown")
+            self.assertEqual(handled, "")
+            self.assertIs(unhandled, UNHANDLED)
+
     def test_planner_returns_expected_plan(self):
         planner = Planner()
         plan = planner.plan("Analiza brain/agent.py")
@@ -197,7 +250,7 @@ class PlannerRouterTests(unittest.TestCase):
                         if message.startswith("aplica"):
                             self.assertIsInstance(result, str)
                         else:
-                            self.assertIsNone(result)
+                            self.assertIs(result, UNHANDLED)
 
             execute_tool.assert_not_called()
 

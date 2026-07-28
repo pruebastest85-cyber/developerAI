@@ -2,8 +2,11 @@ import ast
 from pathlib import Path
 from typing import List, Dict, Any
 
+from tools.tool_result import ToolResult, execute_and_normalize, legacy_tool_value
+
 
 class CodeAnalyzer:
+    name = "code_analyzer"
     risk = "low"
 
     def __init__(self, base_dir=None):
@@ -54,3 +57,14 @@ class CodeAnalyzer:
         if analysis["imports"]:
             parts.append("Imports: " + ", ".join(analysis["imports"][:10]))
         return "\n".join(parts)
+
+    def execute(self, args=None, structured=False):
+        if not isinstance(args, dict) or not isinstance(args.get("path"), str):
+            result = ToolResult.failure(self.name, error="path debe ser una cadena")
+            return result if structured else legacy_tool_value(result)
+        result = execute_and_normalize(
+            self.name,
+            lambda: self.summarize(args["path"]),
+            operational_exceptions=(OSError, UnicodeError, SyntaxError),
+        )
+        return result if structured else legacy_tool_value(result)

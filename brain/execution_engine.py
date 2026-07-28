@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from brain.approval_controller import ApprovalRequiredError
 from brain.execution_state import ExecutionState
 from brain.reflection_engine import ReflectionEngine
+from tools.tool_result import ToolResult
 
 
 ADMINISTRATIVE_STEP_FIELDS = frozenset(
@@ -75,21 +76,28 @@ class ExecutionEngine:
                 project_context=self.agent._read_project_context(),
                 history=self.agent.history,
             )
-            return {"name": name, "status": "ok", "result": context[:500]}
+            return self._tool_step_result(
+                name,
+                ToolResult.success("context_manager", data=context[:500]),
+            )
 
         if name == "run_tests":
             try:
                 report = self.agent.execute_tool(
                     "test_runner",
-                    lambda: self.agent.test_runner.run_tests_report(),
-                    action_name="run_tests_report",
+                    lambda: self.agent.test_runner.execute(structured=True),
+                    action_name="run_tests",
                     important_args={"scope": "default"},
+                    structured=True,
                 )
-                return {"name": name, "status": "ok", "result": report}
+                return self._tool_step_result(name, report)
             except ApprovalRequiredError:
                 raise
             except PermissionError as exc:
-                return {"name": name, "status": "failed", "result": str(exc)}
+                return self._tool_step_result(
+                    name,
+                    ToolResult.failure("test_runner", error=str(exc)),
+                )
 
         if name == "analyze_code":
             target = "brain/agent.py"
@@ -99,20 +107,57 @@ class ExecutionEngine:
                     lambda: self.agent.code_analyzer.summarize(target),
                     action_name="summarize",
                     important_args={"target": target},
+                    structured=True,
                 )
-                return {"name": name, "status": "ok", "result": summary}
+                return self._tool_step_result(name, summary)
             except ApprovalRequiredError:
                 raise
             except PermissionError as exc:
-                return {"name": name, "status": "failed", "result": str(exc)}
+                return self._tool_step_result(
+                    name,
+                    ToolResult.failure("code_analyzer", error=str(exc)),
+                )
 
         if name == "propose_fix":
-            return {"name": name, "status": "ok", "result": "Se propone un parche o ajuste basado en el análisis"}
+            return self._tool_step_result(
+                name,
+                ToolResult.success(
+                    "execution_engine",
+                    message="Se propone un parche o ajuste basado en el análisis",
+                ),
+            )
 
         if name == "reflect":
-            return {"name": name, "status": "ok", "result": "Revisión final del plan y del resultado"}
+            return self._tool_step_result(
+                name,
+                ToolResult.success(
+                    "reflection_engine",
+                    message="Revisión final del plan y del resultado",
+                ),
+            )
 
-        return {"name": name, "status": "skipped", "result": "Paso no implementado"}
+        return self._tool_step_result(
+            name,
+            ToolResult.failure(
+                "execution_engine",
+                error="Paso no implementado",
+            ),
+        )
+
+    @staticmethod
+    def _tool_step_result(name: str, result: ToolResult) -> Dict[str, Any]:
+        payload = result.to_dict()
+        return {
+            "name": name,
+            "status": result.status,
+            "result": payload,
+            "data": payload["data"],
+            "message": payload["message"],
+            "error": payload["error"],
+            "metadata": payload["metadata"],
+            "retryable": payload["retryable"],
+            "tool_name": payload["tool_name"],
+        }
 
     def build_fallback_plan(
         self,
@@ -343,7 +388,10 @@ class ExecutionEngine:
                 break
 
             decision = self.reflection_engine.decide(
-                {"status": "failed", "result": failed_result}
+                {
+                    "status": failed_result.get("status", "failed"),
+                    "result": failed_result,
+                }
             )
             state.observations.append(decision["action"])
             if decision.get("action") != "replan":
