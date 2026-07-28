@@ -503,6 +503,20 @@ class ExecutionEngine:
         resolver = ArgumentResolver()
         return self._continue_workflow(plan, runtime, executor, resolver)
 
+    def build_workflow_report(self, plan: WorkflowPlan, runtime=None):
+        """Build a read-only report without changing or resuming the workflow."""
+        if not isinstance(plan, WorkflowPlan):
+            raise TypeError("plan debe ser WorkflowPlan")
+        runtime = self.last_workflow_runtime if runtime is None else runtime
+        if runtime is None:
+            raise ValueError("No existe un runtime para construir el reporte")
+        from brain.workflow_report_builder import WorkflowReportBuilder
+
+        return WorkflowReportBuilder(
+            self.agent.base_dir,
+            limits=self.workflow_limits,
+        ).build(plan, runtime)
+
     def _continue_workflow(
         self,
         plan: WorkflowPlan,
@@ -559,6 +573,10 @@ class ExecutionEngine:
                 else:
                     result = executor.execute(step, resolved_args, runtime)
             except ApprovalRequiredError as exc:
+                if is_controlled_workflow_step(step):
+                    step_runtime.correction_runtime = (
+                        step_runtime.correction_controller.engine.runtime
+                    )
                 step_runtime.mark_awaiting_approval(resolved_args)
                 runtime.mark_awaiting_approval(step_id)
                 if is_controlled_workflow_step(step):
@@ -609,6 +627,7 @@ class ExecutionEngine:
                 raise
 
             if isinstance(result, CorrectionRuntimeState):
+                step_runtime.correction_runtime = result
                 if result.status == "awaiting_correction":
                     runtime.mark_awaiting_correction(
                         step_id,
@@ -660,6 +679,7 @@ class ExecutionEngine:
         try:
             correction_runtime = controller.submit_correction(submitted_args)
         except ApprovalRequiredError as exc:
+            step_runtime.correction_runtime = controller.engine.runtime
             step_runtime.mark_awaiting_approval(submitted_args)
             runtime.mark_awaiting_approval(step_id)
             self._attach_correction_continuation(
@@ -709,8 +729,11 @@ class ExecutionEngine:
             )
         step_runtime.correction_controller = controller
         try:
-            return controller.start(step.goal, resolved_args)
+            result = controller.start(step.goal, resolved_args)
+            step_runtime.correction_runtime = result
+            return result
         except ApprovalRequiredError:
+            step_runtime.correction_runtime = controller.engine.runtime
             raise
         except BaseException:
             step_runtime.clear_correction_controller()
@@ -755,6 +778,7 @@ class ExecutionEngine:
         correction_runtime: CorrectionRuntimeState,
     ) -> WorkflowRuntimeState:
         step = next(item for item in plan.steps if item.id == step_id)
+        runtime.steps[step_id].correction_runtime = correction_runtime
         if correction_runtime.status == "awaiting_correction":
             runtime.mark_awaiting_correction(
                 step_id,
@@ -775,6 +799,9 @@ class ExecutionEngine:
         resolved_args: Dict[str, Any],
         error: BaseException,
     ) -> None:
+        controller = runtime.steps[step.id].correction_controller
+        if controller is not None:
+            runtime.steps[step.id].correction_runtime = controller.engine.runtime
         result = ToolResult.failure(
             step.tool,
             error=str(error) or type(error).__name__,
@@ -831,7 +858,7 @@ class ExecutionEngine:
                 runtime.mark_cancelled(step_id, reason)
 
         def record_request(request_id: str) -> None:
-            runtime.approval_request_id = request_id
+            runtime.record_approval_request(step_id, request_id)
 
         error.execute = continue_after_approval
         error.on_cancel = cancel_pending
@@ -874,7 +901,7 @@ class ExecutionEngine:
             runtime.mark_cancelled(step_id, reason)
 
         def record_request(request_id: str) -> None:
-            runtime.approval_request_id = request_id
+            runtime.record_approval_request(step_id, request_id)
 
         error.execute = continue_after_approval
         error.on_cancel = cancel_pending

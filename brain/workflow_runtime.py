@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+import uuid
 
 from brain.workflow_plan import StepSpec, WorkflowPlan
 from tools.tool_result import ToolResult
+
+if TYPE_CHECKING:
+    from brain.correction_runtime import CorrectionRuntimeState
 
 
 STEP_STATUSES = frozenset(
@@ -49,10 +53,17 @@ class RuntimeStepState:
     reason: str | None = None
     attempts: int = 0
     correction_controller: Any = field(default=None, repr=False, compare=False)
+    correction_runtime: "CorrectionRuntimeState | None" = None
+    approval_status: str = "not_required"
+    approval_request_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in STEP_STATUSES:
             raise ValueError(f"Estado de paso runtime no válido: {self.status}")
+        if self.approval_status not in {
+            "not_required", "pending", "approved", "denied", "cancelled"
+        }:
+            raise ValueError("Estado de aprobación runtime no válido")
 
     def mark_running(self, resolved_args: dict[str, Any]) -> None:
         if self.status not in {"pending", "awaiting_approval"}:
@@ -71,6 +82,7 @@ class RuntimeStepState:
         self.status = "awaiting_approval"
         self.resolved_args = resolved_args
         self.reason = "approval_required"
+        self.approval_status = "pending"
 
     def mark_awaiting_correction(self, reason: str | None = None) -> None:
         if self.status not in {"running", "awaiting_approval"}:
@@ -131,10 +143,13 @@ class WorkflowRuntimeState:
     modified_files: set[str] = field(default_factory=set)
     total_change_bytes: int = 0
     changed_lines: int = 0
+    runtime_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def __post_init__(self) -> None:
         if self.status not in WORKFLOW_STATUSES:
             raise ValueError(f"Estado de workflow no válido: {self.status}")
+        if not isinstance(self.runtime_id, str) or not self.runtime_id:
+            raise ValueError("runtime_id debe ser una cadena no vacía")
 
     @classmethod
     def create(cls, plan: WorkflowPlan, goal: str = "") -> "WorkflowRuntimeState":
@@ -235,6 +250,7 @@ class WorkflowRuntimeState:
         self.current_step_id = step_id
         self.awaiting_step_id = None
         self.approval_request_id = None
+        self.steps[step_id].approval_status = "approved"
         resolved_args = self.steps[step_id].resolved_args
         if resolved_args is None:
             raise WorkflowRuntimeTransitionError(
@@ -258,11 +274,20 @@ class WorkflowRuntimeState:
             )
         step.status = "skipped"
         step.reason = reason
+        step.approval_status = "denied" if reason == "rejected" else "cancelled"
         step.clear_correction_controller()
         self.status = "cancelled"
         self.current_step_id = step_id
         self.awaiting_step_id = None
         self.approval_request_id = None
+
+    def record_approval_request(self, step_id: str, request_id: str) -> None:
+        if step_id not in self.steps:
+            raise KeyError(step_id)
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("request_id debe ser una cadena no vacía")
+        self.approval_request_id = request_id
+        self.steps[step_id].approval_request_id = request_id
 
     def finish(self, plan: WorkflowPlan) -> None:
         if self.status != "running":
