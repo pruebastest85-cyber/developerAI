@@ -39,6 +39,9 @@ class PendingOperation:
     important_args: Dict[str, Any]
     execute: Callable[[], Any]
     description: str
+    force_approval: bool = False
+    on_cancel: Callable[[str], Any] | None = None
+    on_request: Callable[[str], Any] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -60,13 +63,26 @@ class ApprovalResult:
 
 
 class ApprovalRequiredError(PermissionError):
-    def __init__(self, tool_name, action_name, important_args, execute, message):
+    def __init__(
+        self,
+        tool_name,
+        action_name,
+        important_args,
+        execute,
+        message,
+        force_approval=False,
+        on_cancel=None,
+        on_request=None,
+    ):
         super().__init__(message)
         self.tool_name = tool_name
         self.action_name = action_name
         self.important_args = important_args or {}
         self.execute = execute
         self.message = message
+        self.force_approval = bool(force_approval)
+        self.on_cancel = on_cancel
+        self.on_request = on_request
 
 
 def parse_approval_command(text: str) -> Optional[ApprovalCommand]:
@@ -152,7 +168,17 @@ class ApprovalController:
             return f"Ejecutar comando {args['command']}"
         return f"Ejecutar {tool_name}.{action_name}"
 
-    def request_operation(self, tool_name, action_name, important_args, execute, description=None):
+    def request_operation(
+        self,
+        tool_name,
+        action_name,
+        important_args,
+        execute,
+        description=None,
+        force_approval=False,
+        on_cancel=None,
+        on_request=None,
+    ):
         if self._pending_operations:
             existing = next(iter(self._pending_operations.values()))
             return ApprovalResult(
@@ -168,6 +194,7 @@ class ApprovalController:
             tool_name,
             action_name,
             important_args=important_args,
+            force=force_approval,
         )
         if not request or "request_id" not in request:
             return ApprovalResult(
@@ -184,8 +211,13 @@ class ApprovalController:
             important_args=copy.deepcopy(important_args or {}),
             execute=execute,
             description=description or self._default_description(tool_name, action_name, important_args or {}),
+            force_approval=force_approval,
+            on_cancel=on_cancel,
+            on_request=on_request,
         )
         self._pending_operations[request_id] = pending
+        if pending.on_request is not None:
+            pending.on_request(request_id)
         return ApprovalRequired(
             request_id=request_id,
             tool_name=tool_name,
@@ -225,12 +257,37 @@ class ApprovalController:
                 action_name=pending.action_name,
                 important_args=pending.important_args,
                 approval_token=approval_token,
+                require_approval=pending.force_approval,
             )
             return ApprovalResult(
                 status="approved",
                 request_id=request_id,
                 message="Operación aprobada y ejecutada correctamente.",
                 result=result,
+            )
+        except ApprovalRequiredError as exc:
+            if exc.on_request is None and exc.on_cancel is None:
+                return ApprovalResult(
+                    status="failed",
+                    request_id=request_id,
+                    message="La operación aprobada falló durante la ejecución.",
+                )
+            self._pending_operations.pop(request_id, None)
+            requested = self.request_operation(
+                tool_name=exc.tool_name,
+                action_name=exc.action_name,
+                important_args=exc.important_args,
+                execute=exc.execute,
+                description=f"{exc.tool_name}.{exc.action_name}",
+                force_approval=exc.force_approval,
+                on_cancel=exc.on_cancel,
+                on_request=exc.on_request,
+            )
+            return ApprovalResult(
+                status="awaiting_approval",
+                request_id=getattr(requested, "request_id", ""),
+                message=requested.message,
+                result=requested,
             )
         except Exception:
             return ApprovalResult(
@@ -251,6 +308,8 @@ class ApprovalController:
             )
 
         self.agent.permission_manager.cancel_approval_request(request_id)
+        if pending.on_cancel is not None:
+            pending.on_cancel("rejected")
         return ApprovalResult(
             status="rejected",
             request_id=request_id,
@@ -267,6 +326,8 @@ class ApprovalController:
             )
 
         self.agent.permission_manager.cancel_approval_request(request_id)
+        if pending.on_cancel is not None:
+            pending.on_cancel("cancelled")
         return ApprovalResult(
             status="cancelled",
             request_id=request_id,
@@ -324,6 +385,9 @@ class ConversationalController:
                 important_args=exc.important_args,
                 execute=exc.execute,
                 description=f"{exc.tool_name}.{exc.action_name}",
+                force_approval=exc.force_approval,
+                on_cancel=exc.on_cancel,
+                on_request=exc.on_request,
             )
             if isinstance(requested, ApprovalResult):
                 return requested.message

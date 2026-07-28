@@ -9,6 +9,17 @@ from typing import Any, Dict, List, Optional
 from brain.approval_controller import ApprovalRequiredError
 from brain.execution_state import ExecutionState
 from brain.reflection_engine import ReflectionEngine
+from brain.workflow_limits import WorkflowLimits
+from brain.workflow_plan import ArgumentResolver, ResultResolutionError, WorkflowPlan
+from brain.workflow_runtime import (
+    WorkflowRuntimeState,
+    WorkflowRuntimeTransitionError,
+)
+from brain.workflow_tool_executor import (
+    InvalidWorkflowToolResultError,
+    WorkflowLimitExceededError,
+    WorkflowToolExecutor,
+)
 from tools.tool_result import ToolResult
 
 
@@ -41,6 +52,8 @@ class ExecutionEngine:
         self.reflection_engine = ReflectionEngine()
         self.max_retries = max_retries
         self.last_state: Optional[ExecutionState] = None
+        self.last_workflow_runtime: Optional[WorkflowRuntimeState] = None
+        self.workflow_limits = WorkflowLimits()
 
     def build_plan(self, message: str) -> List[Dict[str, str]]:
         text = message.lower().strip()
@@ -432,3 +445,169 @@ class ExecutionEngine:
             "Resultado": executed,
             "State": state.to_dict(),
         }
+
+    def run_workflow(
+        self,
+        plan: WorkflowPlan,
+        goal: str = "",
+        runtime: WorkflowRuntimeState | None = None,
+    ) -> WorkflowRuntimeState:
+        """Execute a validated declarative plan without using legacy replanning."""
+        if not isinstance(plan, WorkflowPlan):
+            raise TypeError("plan debe ser WorkflowPlan")
+        if not isinstance(goal, str):
+            raise TypeError("goal debe ser una cadena")
+        plan.validate()
+
+        executor = WorkflowToolExecutor(self.agent, limits=self.workflow_limits)
+        executor.validate_plan(plan)
+
+        if runtime is None:
+            runtime = WorkflowRuntimeState.create(plan, goal=goal)
+        else:
+            if not isinstance(runtime, WorkflowRuntimeState):
+                raise TypeError("runtime debe ser WorkflowRuntimeState")
+            runtime.validate_for_plan(plan)
+            if runtime.status == "awaiting_approval":
+                raise WorkflowRuntimeTransitionError(
+                    "Un workflow pendiente debe reanudarse mediante su aprobación"
+                )
+            runtime.prepare_resume(plan)
+
+        self.last_workflow_runtime = runtime
+        resolver = ArgumentResolver()
+        return self._continue_workflow(plan, runtime, executor, resolver)
+
+    def _continue_workflow(
+        self,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        executor: WorkflowToolExecutor,
+        resolver: ArgumentResolver,
+    ) -> WorkflowRuntimeState:
+        by_id = {step.id: step for step in plan.steps}
+
+        for step_id in runtime.execution_order:
+            step = by_id[step_id]
+            step_runtime = runtime.steps[step_id]
+            if step_runtime.status == "ok":
+                continue
+            if step_runtime.status in {"failed", "partial", "skipped"}:
+                continue
+            if step_runtime.status == "awaiting_approval":
+                raise WorkflowRuntimeTransitionError(
+                    f"El paso {step_id} todavía espera aprobación"
+                )
+
+            dependencies = set(step.depends_on)
+            dependencies.update(ref.step_id for ref in step.bindings.values())
+            blocked = [
+                dependency
+                for dependency in dependencies
+                if runtime.steps[dependency].status != "ok"
+            ]
+            if blocked:
+                reason = "dependency_not_ok:" + ",".join(
+                    f"{dependency}={runtime.steps[dependency].status}"
+                    for dependency in sorted(blocked)
+                )
+                step_runtime.mark_skipped(reason)
+                continue
+
+            try:
+                resolved_args = resolver.resolve(step, runtime.results)
+            except ResultResolutionError as exc:
+                result = ToolResult.failure(step.tool, error=str(exc))
+                step_runtime.mark_running({})
+                runtime.record_result(step_id, result)
+                continue
+
+            step_runtime.mark_running(resolved_args)
+            runtime.current_step_id = step_id
+            try:
+                result = executor.execute(step, resolved_args, runtime)
+            except ApprovalRequiredError as exc:
+                step_runtime.mark_awaiting_approval(resolved_args)
+                runtime.mark_awaiting_approval(step_id)
+                self._attach_workflow_continuation(
+                    exc,
+                    plan,
+                    runtime,
+                    executor,
+                    resolver,
+                    step_id,
+                    resolved_args,
+                )
+                raise
+            except (WorkflowLimitExceededError, InvalidWorkflowToolResultError) as exc:
+                result = ToolResult.failure(
+                    step.tool,
+                    error=str(exc),
+                    metadata={"exception_type": type(exc).__name__},
+                    retryable=False,
+                )
+
+            runtime.record_result(step_id, result)
+            self._log_workflow_step(step, resolved_args, result)
+
+        runtime.finish(plan)
+        return runtime
+
+    def _attach_workflow_continuation(
+        self,
+        error: ApprovalRequiredError,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        executor: WorkflowToolExecutor,
+        resolver: ArgumentResolver,
+        step_id: str,
+        resolved_args: Dict[str, Any],
+    ) -> None:
+        step = next(item for item in plan.steps if item.id == step_id)
+        approved_action = error.execute
+
+        def continue_after_approval():
+            runtime.begin_approved_step(step_id)
+            try:
+                result = executor.complete_approved(
+                    step,
+                    resolved_args,
+                    runtime,
+                    approved_action,
+                )
+            except (WorkflowLimitExceededError, InvalidWorkflowToolResultError) as exc:
+                result = ToolResult.failure(
+                    step.tool,
+                    error=str(exc),
+                    metadata={"exception_type": type(exc).__name__},
+                    retryable=False,
+                )
+            runtime.record_result(step_id, result)
+            self._log_workflow_step(step, resolved_args, result)
+            return self._continue_workflow(plan, runtime, executor, resolver)
+
+        def cancel_pending(reason: str) -> None:
+            runtime.mark_cancelled(step_id, reason)
+
+        def record_request(request_id: str) -> None:
+            runtime.approval_request_id = request_id
+
+        error.execute = continue_after_approval
+        error.on_cancel = cancel_pending
+        error.on_request = record_request
+
+    def _log_workflow_step(
+        self,
+        step,
+        resolved_args: Dict[str, Any],
+        result: ToolResult,
+    ) -> None:
+        self.agent.action_logger.log(
+            step.tool,
+            params={
+                "workflow_step": step.id,
+                "action": step.action,
+                "args": resolved_args,
+            },
+            result=result,
+        )

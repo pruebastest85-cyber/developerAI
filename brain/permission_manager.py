@@ -37,7 +37,9 @@ class PermissionManager:
             return self.ACTION_RISK_OVERRIDES[(tool_name, action_name)]
         return entry.get("risk", "low") if entry else "unknown"
 
-    def _requires_confirmation(self, tool_name, action_name, entry):
+    def _requires_confirmation(self, tool_name, action_name, entry, force=False):
+        if force:
+            return True
         has_action_override = (tool_name, action_name) in self.ACTION_RISK_OVERRIDES
         risk = self._resolve_risk(tool_name, action_name, entry)
         if risk == "high":
@@ -48,17 +50,23 @@ class PermissionManager:
             return False
         return bool(entry and entry.get("requires_confirmation", False))
 
-    def is_confirmation_required(self, tool_name, action_name="execute"):
+    def is_confirmation_required(self, tool_name, action_name="execute", force=False):
         entry = self._resolve_entry(tool_name)
         if not entry:
             return False
-        return self._requires_confirmation(tool_name, action_name, entry)
+        return self._requires_confirmation(tool_name, action_name, entry, force=force)
 
     def get_risk_level(self, tool_name, action_name="execute"):
         entry = self._resolve_entry(tool_name)
         return self._resolve_risk(tool_name, action_name, entry)
 
-    def create_approval_request(self, tool_name, action_name, important_args=None):
+    def create_approval_request(
+        self,
+        tool_name,
+        action_name,
+        important_args=None,
+        force=False,
+    ):
         if not self.registry:
             return None
 
@@ -66,7 +74,9 @@ class PermissionManager:
         if entry is None:
             return None
 
-        if not self._requires_confirmation(tool_name, action_name, entry):
+        if not self._requires_confirmation(
+            tool_name, action_name, entry, force=force
+        ):
             return None
 
         try:
@@ -99,12 +109,24 @@ class PermissionManager:
     def cancel_approval_request(self, request_id):
         return self._pending_requests.pop(request_id, None) is not None
 
-    def can_execute(self, tool_name, action_name="execute", important_args=None, approval_token=None):
+    def can_execute(
+        self,
+        tool_name,
+        action_name="execute",
+        important_args=None,
+        approval_token=None,
+        require_confirmation=False,
+    ):
         entry = self._resolve_entry(tool_name)
         if not entry:
             return not self.fail_closed
 
-        if self._requires_confirmation(tool_name, action_name, entry):
+        if self._requires_confirmation(
+            tool_name,
+            action_name,
+            entry,
+            force=require_confirmation,
+        ):
             if not approval_token:
                 return False
 
@@ -121,7 +143,7 @@ class PermissionManager:
 
         return True
 
-    def explain(self, tool_name, action_name="execute"):
+    def explain(self, tool_name, action_name="execute", force=False):
         if not self.registry:
             return "Permiso denegado: no hay registro de herramientas disponible."
 
@@ -129,7 +151,9 @@ class PermissionManager:
         if not entry:
             return f"Permiso denegado: la herramienta {tool_name} no está registrada."
 
-        requires_confirmation = self._requires_confirmation(tool_name, action_name, entry)
+        requires_confirmation = self._requires_confirmation(
+            tool_name, action_name, entry, force=force
+        )
         risk = self._resolve_risk(tool_name, action_name, entry)
 
         if requires_confirmation:

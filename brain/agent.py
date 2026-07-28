@@ -72,11 +72,18 @@ class DeveloperAgent:
             return True
         return value
 
-    def create_operation_approval_request(self, tool_name, action_name, important_args=None):
+    def create_operation_approval_request(
+        self,
+        tool_name,
+        action_name,
+        important_args=None,
+        force=False,
+    ):
         return self.permission_manager.create_approval_request(
             tool_name,
             action_name,
             important_args=important_args,
+            force=force,
         )
 
     def execute_tool(
@@ -90,23 +97,34 @@ class DeveloperAgent:
         none_policy="ok",
         operational_exceptions=(),
         retryable=False,
+        require_approval=False,
     ):
         allowed = self.permission_manager.can_execute(
             tool_name,
             action_name=action_name,
             important_args=important_args,
             approval_token=approval_token,
+            require_confirmation=require_approval,
         )
 
         if not allowed:
-            message = self.permission_manager.explain(tool_name, action_name=action_name)
-            if self.permission_manager.is_confirmation_required(tool_name, action_name=action_name):
+            message = self.permission_manager.explain(
+                tool_name,
+                action_name=action_name,
+                force=require_approval,
+            )
+            if self.permission_manager.is_confirmation_required(
+                tool_name,
+                action_name=action_name,
+                force=require_approval,
+            ):
                 raise ApprovalRequiredError(
                     tool_name=tool_name,
                     action_name=action_name,
                     important_args=important_args or {},
                     execute=action,
                     message=message,
+                    force_approval=require_approval,
                 )
             raise PermissionError(message)
         result = execute_and_normalize(
