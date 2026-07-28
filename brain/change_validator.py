@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import stat
+import weakref
 from dataclasses import dataclass
 from difflib import SequenceMatcher, unified_diff
 from pathlib import Path
@@ -14,6 +15,27 @@ from brain.change_proposal import (
 )
 from brain.path_policy import PathPolicy, PathValidationError
 from brain.workflow_limits import WorkflowLimits
+
+
+_AUTHENTIC_VALIDATIONS: dict[int, weakref.ReferenceType] = {}
+
+
+def _register_authentic_validation(
+    validated: "ValidatedChangeProposal",
+) -> "ValidatedChangeProposal":
+    key = id(validated)
+
+    def discard(reference):
+        if _AUTHENTIC_VALIDATIONS.get(key) is reference:
+            _AUTHENTIC_VALIDATIONS.pop(key, None)
+
+    _AUTHENTIC_VALIDATIONS[key] = weakref.ref(validated, discard)
+    return validated
+
+
+def is_authentic_validated_proposal(value) -> bool:
+    reference = _AUTHENTIC_VALIDATIONS.get(id(value))
+    return reference is not None and reference() is value
 
 
 class ChangeValidationError(ValueError):
@@ -91,12 +113,16 @@ class ChangeProposalValidator:
                 f"Presupuesto declarado {proposal.budget} no coincide con {calculated}"
             )
         self._validate_limits(resolved, calculated)
-        return ValidatedChangeProposal(
-            proposal=proposal,
-            proposal_id=proposal.proposal_id,
-            resolved_changes=resolved,
-            calculated_budget=calculated,
-            rendered_diffs=tuple(change.rendered_diff for change in resolved),
+        return _register_authentic_validation(
+            ValidatedChangeProposal(
+                proposal=proposal,
+                proposal_id=proposal.proposal_id,
+                resolved_changes=resolved,
+                calculated_budget=calculated,
+                rendered_diffs=tuple(
+                    change.rendered_diff for change in resolved
+                ),
+            )
         )
 
     def _validate_change(self, change: FileChange) -> ResolvedFileChange:

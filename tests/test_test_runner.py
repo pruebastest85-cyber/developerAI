@@ -157,6 +157,7 @@ class TestRunnerTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.data["skipped"], 1)
+        self.assertEqual(result.data["passed"], 1)
         self.assertEqual(len(result.to_dict()), 7)
 
     def test_oserror_is_non_retryable_and_internal_errors_propagate(self):

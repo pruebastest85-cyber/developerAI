@@ -57,7 +57,10 @@ def _stable_lines(*values: Any) -> list[str]:
     return joined.splitlines()
 
 
-def _category(result: ToolResult, data: dict[str, Any]) -> str:
+def failure_category(result: ToolResult) -> str:
+    if not isinstance(result, ToolResult):
+        raise TestFailureFingerprintError("result debe ser ToolResult")
+    data = result.data if isinstance(result.data, dict) else {}
     reason = result.metadata.get("reason")
     if reason == "timeout" or data.get("timed_out") is True:
         return "timeout"
@@ -116,7 +119,7 @@ def failure_fingerprint(test_spec: TestSpec, tool_result: ToolResult) -> str:
             "targets": list(test_spec.targets),
         },
         "command": command,
-        "category": _category(tool_result, data),
+        "category": failure_category(tool_result),
         "returncode": data.get("returncode"),
         "failed_test_ids": failed_ids,
         "error_test_ids": error_ids,

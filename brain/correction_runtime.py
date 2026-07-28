@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import uuid
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -68,6 +69,7 @@ class CorrectionTestRun:
     test_spec: Any
     result: ToolResult
     fingerprint: str | None = None
+    category: str | None = None
 
 
 @dataclass
@@ -92,10 +94,16 @@ class CorrectionRuntimeState:
     total_changed_lines: int = 0
     pending_approval_request_id: str | None = None
     terminal_reason: str | None = None
+    runtime_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    _current_is_correction: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.goal, str):
             raise CorrectionRuntimeCompatibilityError("goal debe ser una cadena")
+        if not isinstance(self.runtime_id, str) or not self.runtime_id:
+            raise CorrectionRuntimeCompatibilityError(
+                "runtime_id debe ser una cadena no vacía"
+            )
         if not isinstance(self.limits, WorkflowLimits):
             raise CorrectionRuntimeCompatibilityError(
                 "limits debe ser WorkflowLimits"
@@ -119,6 +127,7 @@ class CorrectionRuntimeState:
         proposal: ChangeProposal,
         *,
         correction: bool = False,
+        consume_iteration: bool = True,
     ) -> None:
         self._require_not_terminal()
         if not isinstance(proposal, ChangeProposal):
@@ -136,7 +145,8 @@ class CorrectionRuntimeState:
                 raise CorrectionRuntimeTransitionError(
                     "Se agotó max_correction_iterations"
                 )
-            self.correction_iterations += 1
+            if consume_iteration:
+                self.correction_iterations += 1
         elif self.proposal_history:
             raise CorrectionRuntimeTransitionError(
                 "La propuesta inicial ya fue registrada"
@@ -146,6 +156,7 @@ class CorrectionRuntimeState:
                 "La propuesta inicial requiere estado validating"
             )
         self.current_proposal = proposal
+        self._current_is_correction = correction
         self.validated_proposal = None
         self.proposal_history = (*self.proposal_history, proposal)
         self.status = "validating"
@@ -167,12 +178,50 @@ class CorrectionRuntimeState:
         self.validated_proposal = validated
         self.status = "awaiting_approval"
 
-    def record_rejection(self, reason: str = "rejected") -> None:
+    def record_validation_failure(
+        self,
+        reason: str,
+        *,
+        await_correction: bool = True,
+    ) -> None:
+        if self.status != "validating":
+            raise CorrectionRuntimeTransitionError(
+                "Solo puede fallar una validación en estado validating"
+            )
+        self.validated_proposal = None
+        self.pending_approval_request_id = None
+        self.status = "awaiting_correction" if await_correction else "failed"
+        self.terminal_reason = str(reason)
+
+    def set_pending_approval(self, request_id: str) -> None:
+        if self.status != "awaiting_approval" or self.validated_proposal is None:
+            raise CorrectionRuntimeTransitionError(
+                "La aprobación requiere una propuesta validada"
+            )
+        if not isinstance(request_id, str) or not request_id:
+            raise CorrectionRuntimeCompatibilityError(
+                "request_id debe ser una cadena no vacía"
+            )
+        if (
+            self.pending_approval_request_id is not None
+            and self.pending_approval_request_id != request_id
+        ):
+            raise CorrectionRuntimeCompatibilityError(
+                "Ya existe otra solicitud de aprobación pendiente"
+            )
+        self.pending_approval_request_id = request_id
+
+    def record_rejection(
+        self,
+        reason: str = "rejected",
+        *,
+        await_correction: bool = False,
+    ) -> None:
         if self.status not in {"validating", "awaiting_approval"}:
             raise CorrectionRuntimeTransitionError(
                 f"No se puede rechazar desde {self.status}"
             )
-        self.status = "cancelled"
+        self.status = "awaiting_correction" if await_correction else "cancelled"
         self.terminal_reason = str(reason)
         self.pending_approval_request_id = None
 
@@ -197,6 +246,14 @@ class CorrectionRuntimeState:
                 "La propuesta ya fue registrada como aplicada"
             )
         budget = validated.calculated_budget
+        if self._current_is_correction:
+            if self.correction_iterations >= self.limits.max_correction_iterations:
+                self.status = "correction_limit_reached"
+                self.terminal_reason = "max_correction_iterations"
+                raise CorrectionRuntimeTransitionError(
+                    "Se agotó max_correction_iterations"
+                )
+            self.correction_iterations += 1
         self.applied_proposal_ids = self.applied_proposal_ids | {proposal_id}
         self.modified_files = self.modified_files | {
             change.relative_path for change in validated.resolved_changes
@@ -222,6 +279,7 @@ class CorrectionRuntimeState:
         test_spec: Any,
         result: ToolResult,
         fingerprint: str | None = None,
+        category: str | None = None,
     ) -> None:
         if self.status not in {"testing_focused", "testing_full"}:
             raise CorrectionRuntimeTransitionError(
@@ -237,12 +295,19 @@ class CorrectionRuntimeState:
             raise CorrectionRuntimeCompatibilityError(
                 "fingerprint debe ser una cadena no vacía"
             )
+        if category is not None and (
+            not isinstance(category, str) or not category
+        ):
+            raise CorrectionRuntimeCompatibilityError(
+                "category debe ser una cadena no vacía"
+            )
         self.test_runs = (
             *self.test_runs,
             CorrectionTestRun(
                 test_spec=copy.deepcopy(test_spec),
                 result=copy.deepcopy(result),
                 fingerprint=fingerprint,
+                category=category,
             ),
         )
 
@@ -280,11 +345,37 @@ class CorrectionRuntimeState:
         self.status = "failed"
         self.terminal_reason = str(reason)
 
-    def mark_rollback_failed(self, reason: str) -> None:
+    def mark_cancelled(self, reason: str = "cancelled") -> None:
+        self._require_not_terminal()
+        self.status = "cancelled"
+        self.terminal_reason = str(reason)
+        self.pending_approval_request_id = None
+
+    def mark_rollback_failed(
+        self,
+        reason: str,
+        *,
+        modified_paths=(),
+        created_paths=(),
+        write_bytes: int = 0,
+        changed_lines: int = 0,
+    ) -> None:
         if self.status != "applying":
             raise CorrectionRuntimeTransitionError(
                 "rollback_failed solo es válido durante applying"
             )
+        for name, value in (
+            ("write_bytes", write_bytes),
+            ("changed_lines", changed_lines),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise CorrectionRuntimeCompatibilityError(
+                    f"{name} debe ser un entero no negativo"
+                )
+        self.modified_files = self.modified_files | frozenset(modified_paths)
+        self.new_files = self.new_files | frozenset(created_paths)
+        self.total_write_bytes += write_bytes
+        self.total_changed_lines += changed_lines
         self.status = "rollback_failed"
         self.terminal_reason = str(reason)
 

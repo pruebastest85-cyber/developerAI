@@ -198,6 +198,13 @@ class TestRunner:
             "failures": counts["failures"],
             "errors": counts["errors"],
             "skipped": counts["skipped"],
+            "passed": max(
+                0,
+                tests_run
+                - counts["failures"]
+                - counts["errors"]
+                - counts["skipped"],
+            ),
             "failed_test_ids": sorted(set(failed_ids)),
             "error_test_ids": sorted(set(error_ids)),
         }
