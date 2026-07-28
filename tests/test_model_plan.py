@@ -12,6 +12,7 @@ from brain.model_plan import (
     ModelPlanDecision,
     ModelPlanLimits,
     ModelPlanStep,
+    MODEL_PLAN_OUTPUT_SCHEMA,
     SAFE_MODEL_OPERATION_CATALOG,
 )
 from brain.workflow_plan import StepSpec, WorkflowPlan
@@ -663,6 +664,121 @@ class ModelPlanTests(unittest.TestCase):
         )
         self.assertEqual(adapter.adapt(decision).steps[0].id, "inspect_1")
         self.assertEqual(decision.steps[0].id, "inspect_1")
+
+    def test_output_schema_is_exact_closed_and_bounded(self):
+        schema = MODEL_PLAN_OUTPUT_SCHEMA.to_openai_schema()
+        self.assertEqual(schema["type"], "object")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["properties"]), {
+            "schema_version", "goal", "completed", "steps", "message",
+        })
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(
+            schema["properties"]["schema_version"]["enum"], ["1"]
+        )
+        self.assertEqual(schema["properties"]["goal"]["maxLength"], 1000)
+        self.assertEqual(schema["properties"]["message"]["maxLength"], 2000)
+
+        steps = schema["properties"]["steps"]
+        self.assertEqual((steps["minItems"], steps["maxItems"]), (0, 8))
+        step = steps["items"]
+        self.assertFalse(step["additionalProperties"])
+        self.assertEqual(set(step["required"]), set(step["properties"]))
+        self.assertEqual(
+            set(step["properties"]),
+            {
+                "id", "tool", "action", "args", "goal",
+                "depends_on", "justification",
+            },
+        )
+        self.assertEqual(
+            (
+                step["properties"]["id"]["minLength"],
+                step["properties"]["id"]["maxLength"],
+            ),
+            (1, 64),
+        )
+        self.assertEqual(step["properties"]["goal"]["maxLength"], 500)
+        self.assertEqual(
+            step["properties"]["justification"]["maxLength"], 500
+        )
+        self.assertEqual(
+            step["properties"]["depends_on"]["maxItems"], 8
+        )
+        args = step["properties"]["args"]
+        self.assertFalse(args["additionalProperties"])
+        self.assertEqual(args["required"], [])
+        self.assertEqual(
+            set(args["properties"]), {"path", "max_lines", "new_content"}
+        )
+        self.assertEqual(
+            set(step["properties"]["tool"]["enum"]),
+            {tool for tool, _ in SAFE_MODEL_OPERATION_CATALOG},
+        )
+        self.assertEqual(
+            set(step["properties"]["action"]["enum"]),
+            {action for _, action in SAFE_MODEL_OPERATION_CATALOG},
+        )
+        self.assertEqual(
+            set(args["properties"]),
+            {
+                name
+                for contract in SAFE_MODEL_OPERATION_CATALOG.values()
+                for name in contract.arguments
+            },
+        )
+        self.assertEqual(
+            (
+                args["properties"]["path"]["minLength"],
+                args["properties"]["path"]["maxLength"],
+            ),
+            (1, 512),
+        )
+        self.assertEqual(
+            args["properties"]["new_content"]["maxLength"], 256 * 1024
+        )
+
+    def test_output_schema_supports_base_catalog_but_not_semantic_bypass(self):
+        schema = MODEL_PLAN_OUTPUT_SCHEMA
+        examples = [
+            step_payload(),
+            step_payload(
+                tool="code_analyzer",
+                action="summarize",
+                args={"path": "brain/agent.py"},
+            ),
+            step_payload(
+                tool="patch_generator",
+                action="generate_patch",
+                args={"path": "brain/agent.py", "new_content": "pass\n"},
+            ),
+            step_payload(
+                tool="test_runner", action="run_tests", args={}
+            ),
+            step_payload(tool="git_tools", action="status", args={}),
+        ]
+        for model_step in examples:
+            with self.subTest(model_step=model_step):
+                payload = decision_payload(steps=[model_step])
+                schema.validate(payload)
+                self.adapt(payload)
+
+        mismatched = decision_payload(
+            steps=[
+                step_payload(
+                    tool="code_reader",
+                    action="status",
+                    args={"path": "brain/agent.py"},
+                )
+            ]
+        )
+        schema.validate(mismatched)
+        self.assert_code(
+            "unknown_action",
+            lambda: self.adapt(mismatched),
+        )
+        with self.assertRaises(TypeError):
+            schema.schema["properties"] = {}
 
 
 if __name__ == "__main__":

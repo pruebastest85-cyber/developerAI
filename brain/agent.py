@@ -29,8 +29,18 @@ from tools.registry import build_default_registry
 
 
 class DeveloperAgent:
-    def __init__(self, client, memory_file=None, prompt_dir=None, base_dir=None, action_log_file=None):
+    def __init__(
+        self,
+        client,
+        memory_file=None,
+        prompt_dir=None,
+        base_dir=None,
+        action_log_file=None,
+        *,
+        model_planning_service=None,
+    ):
         self.client = client
+        self.model_planning_service = model_planning_service
         self.memory_file = memory_file
         self.prompt_dir = Path(prompt_dir or "prompts")
         self.base_dir = Path(base_dir or ".").resolve()
@@ -373,6 +383,13 @@ class DeveloperAgent:
     @staticmethod
     def _present_tool_result(result):
         return present_tool_result(result)
+
+    def plan_with_model(self, user_request):
+        if self.model_planning_service is None:
+            from brain.model_planning_service import ModelPlanningServiceError
+
+            raise ModelPlanningServiceError("service_unavailable")
+        return self.model_planning_service.plan(user_request)
 
     def respond(self, message):
         memory_response = self.handle_memory(message)

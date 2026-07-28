@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from brain.structured_json import StructuredOutputSchema
 from brain.workflow_plan import StepSpec, WorkflowPlan, WorkflowValidationError
 
 
@@ -222,6 +223,104 @@ SAFE_MODEL_OPERATION_CATALOG = MappingProxyType(
         ("test_runner", "run_tests"): ModelOperationContract(),
         ("git_tools", "status"): ModelOperationContract(),
     }
+)
+
+MODEL_PLAN_OUTPUT_SCHEMA = StructuredOutputSchema(
+    "developer_ai_model_plan",
+    {
+        "type": "object",
+        "properties": {
+            "schema_version": {"type": "string", "enum": ["1"]},
+            "goal": {"type": "string", "maxLength": 1000},
+            "completed": {"type": "boolean"},
+            "steps": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 64,
+                        },
+                        "tool": {
+                            "type": "string",
+                            "enum": [
+                                "code_reader",
+                                "code_analyzer",
+                                "patch_generator",
+                                "test_runner",
+                                "git_tools",
+                            ],
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "read_file",
+                                "summarize",
+                                "generate_patch",
+                                "run_tests",
+                                "status",
+                            ],
+                        },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 512,
+                                },
+                                "max_lines": {"type": "integer"},
+                                "new_content": {
+                                    "type": "string",
+                                    "maxLength": 256 * 1024,
+                                },
+                            },
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                        "goal": {"type": "string", "maxLength": 500},
+                        "depends_on": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64,
+                            },
+                            "minItems": 0,
+                            "maxItems": 8,
+                        },
+                        "justification": {
+                            "type": "string",
+                            "maxLength": 500,
+                        },
+                    },
+                    "required": [
+                        "id",
+                        "tool",
+                        "action",
+                        "args",
+                        "goal",
+                        "depends_on",
+                        "justification",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "message": {"type": "string", "maxLength": 2000},
+        },
+        "required": [
+            "schema_version",
+            "goal",
+            "completed",
+            "steps",
+            "message",
+        ],
+        "additionalProperties": False,
+    },
 )
 
 
