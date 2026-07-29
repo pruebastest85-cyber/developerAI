@@ -349,6 +349,12 @@ class ConversationalController:
         self.approval_controller = approval_controller or ApprovalController(agent)
 
     def process_message(self, text: str) -> str:
+        get_session = getattr(self.agent, "get_programming_session", None)
+        if callable(get_session):
+            session = get_session()
+            if session.should_handle_command(text):
+                return self.agent.respond(text)
+
         parts = text.strip().split()
         if parts and parts[0].lower() in MODEL_PLAN_APPROVAL_VERBS:
             from brain.model_plan_review import (

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from brain.approval_controller import ApprovalRequiredError
+from brain.controlled_programming_session import ControlledProgrammingSession
 from memory.memory import agregar_recuerdo, leer_memoria
 from tools.action_logger import ActionLogger
 from tools.code_analyzer import CodeAnalyzer
@@ -74,6 +75,7 @@ class DeveloperAgent:
 
             model_plan_review_controller = ModelPlanReviewController(self)
         self.model_plan_review_controller = model_plan_review_controller
+        self._programming_session = ControlledProgrammingSession(self)
         self._initialize_history()
 
     def _read_medium_risk_policy(self):
@@ -414,7 +416,14 @@ class DeveloperAgent:
     def cancel_model_plan(self, plan_id):
         return self.model_plan_review_controller.cancel(plan_id)
 
+    def get_programming_session(self):
+        """Obtiene la sesión de programación controlada."""
+        return self._programming_session
+
     def respond(self, message):
+        if ControlledProgrammingSession.is_controlled_message(message):
+            return self._programming_session.handle_message(message)
+
         memory_response = self.handle_memory(message)
         if memory_response is None:
             memory_response = UNHANDLED
