@@ -476,12 +476,16 @@ class ExecutionEngine:
         plan: WorkflowPlan,
         goal: str = "",
         runtime: WorkflowRuntimeState | None = None,
+        *,
+        safe_logging: bool = False,
     ) -> WorkflowRuntimeState:
         """Execute a validated declarative plan without using legacy replanning."""
         if not isinstance(plan, WorkflowPlan):
             raise TypeError("plan debe ser WorkflowPlan")
         if not isinstance(goal, str):
             raise TypeError("goal debe ser una cadena")
+        if not isinstance(safe_logging, bool):
+            raise TypeError("safe_logging debe ser bool")
         plan.validate()
 
         executor = WorkflowToolExecutor(self.agent, limits=self.workflow_limits)
@@ -501,7 +505,13 @@ class ExecutionEngine:
 
         self.last_workflow_runtime = runtime
         resolver = ArgumentResolver()
-        return self._continue_workflow(plan, runtime, executor, resolver)
+        return self._continue_workflow(
+            plan,
+            runtime,
+            executor,
+            resolver,
+            safe_logging=safe_logging,
+        )
 
     def build_workflow_report(self, plan: WorkflowPlan, runtime=None):
         """Build a read-only report without changing or resuming the workflow."""
@@ -523,6 +533,8 @@ class ExecutionEngine:
         runtime: WorkflowRuntimeState,
         executor: WorkflowToolExecutor,
         resolver: ArgumentResolver,
+        *,
+        safe_logging: bool = False,
     ) -> WorkflowRuntimeState:
         by_id = {step.id: step for step in plan.steps}
 
@@ -588,6 +600,7 @@ class ExecutionEngine:
                         resolver,
                         step_id,
                         resolved_args,
+                        safe_logging=safe_logging,
                     )
                 else:
                     self._attach_workflow_continuation(
@@ -598,6 +611,7 @@ class ExecutionEngine:
                         resolver,
                         step_id,
                         resolved_args,
+                        safe_logging=safe_logging,
                     )
                 raise
             except ChangeProposalAdaptationError as exc:
@@ -623,6 +637,7 @@ class ExecutionEngine:
                         step,
                         resolved_args,
                         exc,
+                        safe_logging=safe_logging,
                     )
                 raise
 
@@ -638,7 +653,12 @@ class ExecutionEngine:
                 step_runtime.clear_correction_controller()
 
             runtime.record_result(step_id, result)
-            self._log_workflow_step(step, resolved_args, result)
+            self._log_workflow_step(
+                step,
+                resolved_args,
+                result,
+                safe=safe_logging,
+            )
 
         runtime.finish(plan)
         return runtime
@@ -776,6 +796,8 @@ class ExecutionEngine:
         step_id: str,
         resolved_args: Dict[str, Any],
         correction_runtime: CorrectionRuntimeState,
+        *,
+        safe_logging: bool = False,
     ) -> WorkflowRuntimeState:
         step = next(item for item in plan.steps if item.id == step_id)
         runtime.steps[step_id].correction_runtime = correction_runtime
@@ -788,8 +810,19 @@ class ExecutionEngine:
         result = self._correction_tool_result(step.tool, correction_runtime)
         runtime.steps[step_id].clear_correction_controller()
         runtime.record_result(step_id, result)
-        self._log_workflow_step(step, resolved_args, result)
-        return self._continue_workflow(plan, runtime, executor, resolver)
+        self._log_workflow_step(
+            step,
+            resolved_args,
+            result,
+            safe=safe_logging,
+        )
+        return self._continue_workflow(
+            plan,
+            runtime,
+            executor,
+            resolver,
+            safe_logging=safe_logging,
+        )
 
     def _record_correction_exception(
         self,
@@ -798,6 +831,8 @@ class ExecutionEngine:
         step,
         resolved_args: Dict[str, Any],
         error: BaseException,
+        *,
+        safe_logging: bool = False,
     ) -> None:
         controller = runtime.steps[step.id].correction_controller
         if controller is not None:
@@ -810,7 +845,12 @@ class ExecutionEngine:
         )
         runtime.steps[step.id].clear_correction_controller()
         runtime.record_result(step.id, result)
-        self._log_workflow_step(step, resolved_args, result)
+        self._log_workflow_step(
+            step,
+            resolved_args,
+            result,
+            safe=safe_logging,
+        )
         runtime.finish(plan)
 
     def _attach_correction_continuation(
@@ -822,6 +862,8 @@ class ExecutionEngine:
         resolver: ArgumentResolver,
         step_id: str,
         resolved_args: Dict[str, Any],
+        *,
+        safe_logging: bool = False,
     ) -> None:
         approved_action = error.execute
         cancelled_action = error.on_cancel
@@ -838,6 +880,7 @@ class ExecutionEngine:
                     step_id,
                     resolved_args,
                     correction_runtime,
+                    safe_logging=safe_logging,
                 )
             except BaseException as exc:
                 step = next(item for item in plan.steps if item.id == step_id)
@@ -847,6 +890,7 @@ class ExecutionEngine:
                     step,
                     resolved_args,
                     exc,
+                    safe_logging=safe_logging,
                 )
                 raise
 
@@ -873,6 +917,8 @@ class ExecutionEngine:
         resolver: ArgumentResolver,
         step_id: str,
         resolved_args: Dict[str, Any],
+        *,
+        safe_logging: bool = False,
     ) -> None:
         step = next(item for item in plan.steps if item.id == step_id)
         approved_action = error.execute
@@ -893,9 +939,45 @@ class ExecutionEngine:
                     metadata={"exception_type": type(exc).__name__},
                     retryable=False,
                 )
+            except BaseException as exc:
+                result = ToolResult.failure(
+                    step.tool,
+                    error=str(exc) or type(exc).__name__,
+                    metadata={"exception_type": type(exc).__name__},
+                    retryable=False,
+                )
+                try:
+                    runtime.record_result(step_id, result)
+                except BaseException:
+                    pass
+                try:
+                    runtime.finish(plan)
+                except BaseException:
+                    pass
+                try:
+                    self._log_workflow_step(
+                        step,
+                        resolved_args,
+                        result,
+                        safe=safe_logging,
+                    )
+                except BaseException:
+                    pass
+                raise
             runtime.record_result(step_id, result)
-            self._log_workflow_step(step, resolved_args, result)
-            return self._continue_workflow(plan, runtime, executor, resolver)
+            self._log_workflow_step(
+                step,
+                resolved_args,
+                result,
+                safe=safe_logging,
+            )
+            return self._continue_workflow(
+                plan,
+                runtime,
+                executor,
+                resolver,
+                safe_logging=safe_logging,
+            )
 
         def cancel_pending(reason: str) -> None:
             runtime.mark_cancelled(step_id, reason)
@@ -912,7 +994,20 @@ class ExecutionEngine:
         step,
         resolved_args: Dict[str, Any],
         result: ToolResult,
+        *,
+        safe: bool = False,
     ) -> None:
+        if safe:
+            self.agent.action_logger.log(
+                step.tool,
+                params={
+                    "workflow_step": step.id,
+                    "action": step.action,
+                    "status": result.status,
+                },
+                result={"status": result.status},
+            )
+            return
         self.agent.action_logger.log(
             step.tool,
             params={

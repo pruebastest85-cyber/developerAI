@@ -156,6 +156,10 @@ class DeveloperAgentTests(unittest.TestCase):
             DeveloperAgent.__init__
         ).parameters["model_planning_service"]
         self.assertIs(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        review_parameter = inspect.signature(
+            DeveloperAgent.__init__
+        ).parameters["model_plan_review_controller"]
+        self.assertIs(review_parameter.kind, inspect.Parameter.KEYWORD_ONLY)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = DeveloperAgent(
@@ -209,9 +213,16 @@ class DeveloperAgentTests(unittest.TestCase):
         router.assert_not_called()
         legacy.assert_not_called()
         workflow.assert_not_called()
-        logger.assert_not_called()
+        logger.assert_called_once()
+        logged = logger.call_args.kwargs["params"]
+        self.assertEqual(logged["event"], "model_plan_generated")
+        self.assertNotIn("args", logged)
         permission.assert_not_called()
         execute_tool.assert_not_called()
+        self.assertIs(
+            agent.model_plan_review_controller._pending.result,
+            result,
+        )
 
     def test_plan_with_model_propagates_service_error(self):
         service = mock.Mock()
@@ -225,9 +236,15 @@ class DeveloperAgentTests(unittest.TestCase):
                 action_log_file=Path(tmpdir) / "actions.json",
                 model_planning_service=service,
             )
+            previous = self.planning_result()
+            agent.model_plan_review_controller.register(previous)
             with self.assertRaises(ModelPlanningServiceError) as caught:
                 agent.plan_with_model("Plan")
         self.assertEqual(caught.exception.code, "invalid_model_response")
+        self.assertIs(
+            agent.model_plan_review_controller._pending.result,
+            previous,
+        )
 
     def test_respond_keeps_historical_planner_router_and_client_path(self):
         response = mock.Mock()

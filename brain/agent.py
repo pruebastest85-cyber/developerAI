@@ -38,6 +38,7 @@ class DeveloperAgent:
         action_log_file=None,
         *,
         model_planning_service=None,
+        model_plan_review_controller=None,
     ):
         self.client = client
         self.model_planning_service = model_planning_service
@@ -68,6 +69,11 @@ class DeveloperAgent:
         )
         self.tool_router = ToolRouter(self)
         self.execution_engine = ExecutionEngine(self)
+        if model_plan_review_controller is None:
+            from brain.model_plan_review import ModelPlanReviewController
+
+            model_plan_review_controller = ModelPlanReviewController(self)
+        self.model_plan_review_controller = model_plan_review_controller
         self._initialize_history()
 
     def _read_medium_risk_policy(self):
@@ -389,7 +395,24 @@ class DeveloperAgent:
             from brain.model_planning_service import ModelPlanningServiceError
 
             raise ModelPlanningServiceError("service_unavailable")
-        return self.model_planning_service.plan(user_request)
+        result = self.model_planning_service.plan(user_request)
+        self.model_plan_review_controller.register(result)
+        return result
+
+    def get_pending_model_plan(self):
+        return self.model_plan_review_controller.get_pending()
+
+    def render_pending_model_plan(self):
+        return self.model_plan_review_controller.render_pending()
+
+    def approve_model_plan(self, plan_id):
+        return self.model_plan_review_controller.approve(plan_id)
+
+    def reject_model_plan(self, plan_id):
+        return self.model_plan_review_controller.reject(plan_id)
+
+    def cancel_model_plan(self, plan_id):
+        return self.model_plan_review_controller.cancel(plan_id)
 
     def respond(self, message):
         memory_response = self.handle_memory(message)

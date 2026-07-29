@@ -11,6 +11,9 @@ UUID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 APPROVAL_VERBS = {"aprobar", "approve", "rechazar", "reject", "cancelar", "cancel"}
+MODEL_PLAN_APPROVAL_VERBS = {
+    "aprobar-plan", "rechazar-plan", "cancelar-plan",
+}
 SENSITIVE_KEY_PARTS = (
     "password",
     "passwd",
@@ -347,6 +350,31 @@ class ConversationalController:
 
     def process_message(self, text: str) -> str:
         parts = text.strip().split()
+        if parts and parts[0].lower() in MODEL_PLAN_APPROVAL_VERBS:
+            from brain.model_plan_review import (
+                ModelPlanReviewError,
+                parse_model_plan_command,
+            )
+
+            command = parse_model_plan_command(text)
+            if command is None:
+                return (
+                    "Comando de plan inválido. Usa: "
+                    "aprobar-plan|rechazar-plan|cancelar-plan <plan_id exacto>"
+                )
+            action, plan_id = command
+            try:
+                if action == "approve":
+                    runtime = self.agent.approve_model_plan(plan_id)
+                    return f"Plan aprobado. Estado del workflow: {runtime.status}"
+                if action == "reject":
+                    return self.agent.reject_model_plan(plan_id).message
+                return self.agent.cancel_model_plan(plan_id).message
+            except ApprovalRequiredError as exc:
+                return self._request_operation(exc)
+            except ModelPlanReviewError as exc:
+                return str(exc)
+
         if parts and parts[0].lower() in APPROVAL_VERBS:
             command = parse_approval_command(text)
             if command is None:
@@ -379,16 +407,17 @@ class ConversationalController:
         try:
             return self.agent.respond(text)
         except ApprovalRequiredError as exc:
-            requested = self.approval_controller.request_operation(
-                tool_name=exc.tool_name,
-                action_name=exc.action_name,
-                important_args=exc.important_args,
-                execute=exc.execute,
-                description=f"{exc.tool_name}.{exc.action_name}",
-                force_approval=exc.force_approval,
-                on_cancel=exc.on_cancel,
-                on_request=exc.on_request,
-            )
-            if isinstance(requested, ApprovalResult):
-                return requested.message
-            return requested.message
+            return self._request_operation(exc)
+
+    def _request_operation(self, error: ApprovalRequiredError) -> str:
+        requested = self.approval_controller.request_operation(
+            tool_name=error.tool_name,
+            action_name=error.action_name,
+            important_args=error.important_args,
+            execute=error.execute,
+            description=f"{error.tool_name}.{error.action_name}",
+            force_approval=error.force_approval,
+            on_cancel=error.on_cancel,
+            on_request=error.on_request,
+        )
+        return requested.message
