@@ -337,6 +337,14 @@ class ApprovalController:
             message="La solicitud fue cancelada. No se ejecutó ninguna operación.",
         )
 
+    def _invalidate_without_callback(self, request_id):
+        """Consume a stale internal request without executing its continuation."""
+        pending = self._pending_operations.pop(request_id, None)
+        if pending is None:
+            return False
+        self.agent.permission_manager.cancel_approval_request(request_id)
+        return True
+
     def get_pending(self, request_id=None):
         if request_id is None:
             return list(self._pending_operations.values())

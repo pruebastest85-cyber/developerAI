@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from brain.approval_controller import ApprovalRequiredError
+from brain.change_proposal import ChangeProposal
 from brain.change_proposal_adapter import ChangeProposalAdapter
 from brain.correction_engine import (
     CorrectionApprovalError,
@@ -67,9 +68,13 @@ class CorrectionWorkflowController:
 
     def submit_correction(
         self,
-        arguments: Mapping[str, Any],
+        arguments: Mapping[str, Any] | ChangeProposal,
     ) -> CorrectionRuntimeState:
-        proposal = self.adapter.adapt(arguments)
+        proposal = (
+            arguments
+            if isinstance(arguments, ChangeProposal)
+            else self.adapter.adapt(arguments)
+        )
         runtime = self.engine.submit_correction(proposal)
         return self._suspend_if_required(runtime)
 
@@ -160,7 +165,6 @@ class CorrectionWorkflowController:
             "goal": request.goal,
             "changes": [list(item) for item in request.changes],
             "budget": copy.deepcopy(dict(request.budget)),
-            "risks": list(request.risks),
         }
 
     @staticmethod

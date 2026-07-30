@@ -202,8 +202,18 @@ class StructuredOutputSchema:
             if unknown:
                 raise SchemaValidationError(code="unknown_schema_keyword")
             kind = schema.get("type")
-            if not isinstance(kind, str) or kind not in SCHEMA_TYPES:
-                raise SchemaValidationError(code="unsupported_schema_type")
+            union = isinstance(kind, (list, tuple))
+            if union:
+                if (
+                    tuple(kind) != ("string", "null")
+                    or len(set(kind)) != len(kind)
+                ):
+                    raise SchemaValidationError(code="unsupported_schema_type")
+                effective_kind = "string_or_null"
+            else:
+                if not isinstance(kind, str) or kind not in SCHEMA_TYPES:
+                    raise SchemaValidationError(code="unsupported_schema_type")
+                effective_kind = kind
             allowed_for_type = {
                 "object": {"type", "properties", "required", "additionalProperties", "enum"},
                 "array": {"type", "items", "minItems", "maxItems", "enum"},
@@ -212,10 +222,11 @@ class StructuredOutputSchema:
                 "number": {"type", "enum"},
                 "boolean": {"type", "enum"},
                 "null": {"type", "enum"},
-            }[kind]
+                "string_or_null": {"type", "minLength", "maxLength", "enum"},
+            }[effective_kind]
             if set(schema).difference(allowed_for_type):
                 raise SchemaValidationError(code="keyword_not_allowed_for_type")
-            if kind == "object":
+            if effective_kind == "object":
                 properties = schema.get("properties", {})
                 if not isinstance(properties, Mapping):
                     raise SchemaValidationError(code="invalid_properties")
@@ -232,7 +243,7 @@ class StructuredOutputSchema:
                     if not isinstance(key, str):
                         raise SchemaValidationError(code="invalid_property_name")
                     cls._validate_schema(nested, active)
-            elif kind == "array":
+            elif effective_kind == "array":
                 if "items" not in schema:
                     raise SchemaValidationError(code="missing_items")
                 cls._validate_schema(schema["items"], active)
@@ -270,6 +281,12 @@ class StructuredOutputSchema:
     @classmethod
     def _validate_value(cls, value, schema):
         kind = schema["type"]
+        if isinstance(kind, (list, tuple)):
+            if value is None and "null" in kind:
+                if "enum" in schema and freeze_json(value) not in schema["enum"]:
+                    raise SchemaValidationError()
+                return
+            kind = "string" if "string" in kind else kind[0]
         valid = {
             "null": value is None,
             "boolean": isinstance(value, bool),

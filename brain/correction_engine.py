@@ -52,6 +52,30 @@ class CorrectionProposalError(CorrectionEngineError):
 
 
 @dataclass(frozen=True)
+class CorrectionApprovalSnapshot:
+    """Immutable authority and budget state bound to one approval request."""
+
+    runtime_id: str
+    proposal_id: str
+    limits: tuple[tuple[str, int], ...]
+    correction_iterations: int
+    modified_files: frozenset[str]
+    new_files: frozenset[str]
+    total_write_bytes: int
+    total_changed_lines: int
+    test_run_count: int
+    applied_proposal_ids: frozenset[str]
+    proposal_budget: tuple[tuple[str, int], ...]
+    file_count: int
+    operation_count: int
+    application_count: int
+    remaining_files: int
+    remaining_write_bytes: int
+    remaining_changed_lines: int
+    remaining_applications: int
+
+
+@dataclass(frozen=True)
 class CorrectionApprovalRequest:
     request_id: str
     runtime_id: str
@@ -59,7 +83,7 @@ class CorrectionApprovalRequest:
     goal: str
     changes: tuple[tuple[str, str], ...]
     budget: Mapping[str, int]
-    risks: tuple[str, ...]
+    snapshot: CorrectionApprovalSnapshot | None = None
 
     def __post_init__(self):
         for name in ("request_id", "runtime_id", "proposal_id", "goal"):
@@ -70,7 +94,6 @@ class CorrectionApprovalRequest:
                 )
         try:
             changes = tuple(tuple(item) for item in self.changes)
-            risks = tuple(self.risks)
             budget = dict(self.budget)
         except (TypeError, ValueError) as exc:
             raise CorrectionApprovalError(
@@ -82,8 +105,6 @@ class CorrectionApprovalRequest:
             for item in changes
         ):
             raise CorrectionApprovalError("changes no es un resumen válido")
-        if any(not isinstance(risk, str) for risk in risks):
-            raise CorrectionApprovalError("risks solo admite cadenas")
         for name, value in budget.items():
             if (
                 not isinstance(name, str)
@@ -93,12 +114,56 @@ class CorrectionApprovalRequest:
             ):
                 raise CorrectionApprovalError("budget no es válido")
         object.__setattr__(self, "changes", changes)
-        object.__setattr__(self, "risks", risks)
         object.__setattr__(
             self,
             "budget",
             MappingProxyType(budget),
         )
+        if not isinstance(self.snapshot, CorrectionApprovalSnapshot):
+            raise CorrectionApprovalError(
+                "resumen de aprobaciÃ³n sin snapshot vÃ¡lido"
+            )
+
+
+def _build_approval_snapshot(
+    runtime: CorrectionRuntimeState,
+    validated: ValidatedChangeProposal,
+) -> CorrectionApprovalSnapshot:
+    return CorrectionApprovalSnapshot(
+        runtime_id=runtime.runtime_id,
+        proposal_id=validated.proposal_id,
+        limits=tuple(sorted(vars(runtime.limits).items())),
+        correction_iterations=runtime.correction_iterations,
+        modified_files=frozenset(runtime.modified_files),
+        new_files=frozenset(runtime.new_files),
+        total_write_bytes=runtime.total_write_bytes,
+        total_changed_lines=runtime.total_changed_lines,
+        test_run_count=len(runtime.test_runs),
+        applied_proposal_ids=frozenset(runtime.applied_proposal_ids),
+        proposal_budget=tuple(
+            sorted(validated.calculated_budget.canonical_dict().items())
+        ),
+        file_count=len(runtime.modified_files),
+        operation_count=len(validated.resolved_changes),
+        application_count=len(runtime.applied_proposal_ids),
+        remaining_files=max(
+            0,
+            runtime.limits.max_modified_files - len(runtime.modified_files),
+        ),
+        remaining_write_bytes=max(
+            0,
+            runtime.limits.max_total_change_bytes - runtime.total_write_bytes,
+        ),
+        remaining_changed_lines=max(
+            0,
+            runtime.limits.max_changed_lines - runtime.total_changed_lines,
+        ),
+        remaining_applications=max(
+            0,
+            runtime.limits.max_correction_iterations
+            - runtime.correction_iterations,
+        ),
+    )
 
 
 class InMemoryCorrectionApprovalService:
@@ -129,7 +194,7 @@ class InMemoryCorrectionApprovalService:
                 for change in validated.resolved_changes
             ),
             budget=validated.calculated_budget.canonical_dict(),
-            risks=tuple(validated.proposal.risks),
+            snapshot=_build_approval_snapshot(runtime, validated),
         )
         self._pending[request.request_id] = request
         return request
@@ -203,7 +268,7 @@ class PermissionManagerCorrectionApprovalAdapter:
                 for change in validated.resolved_changes
             ),
             budget=validated.calculated_budget.canonical_dict(),
-            risks=tuple(validated.proposal.risks),
+            snapshot=_build_approval_snapshot(runtime, validated),
         )
         self._pending[request.request_id] = request
         return request
@@ -234,7 +299,6 @@ class PermissionManagerCorrectionApprovalAdapter:
             "goal": request.goal,
             "changes": [list(item) for item in request.changes],
             "budget": dict(request.budget),
-            "risks": list(request.risks),
         }
         if not approved:
             self.permission_manager.cancel_approval_request(request_id)
@@ -271,7 +335,6 @@ class PermissionManagerCorrectionApprovalAdapter:
                 for change in validated.resolved_changes
             ],
             "budget": validated.calculated_budget.canonical_dict(),
-            "risks": list(validated.proposal.risks),
         }
 
 
@@ -385,6 +448,46 @@ class CorrectionEngine:
             or proposal_id != runtime.validated_proposal.proposal_id
         ):
             raise CorrectionApprovalError("proposal_id no coincide")
+        request = self._pending_approval_request
+        if (
+            request is None
+            or request.request_id != request_id
+            or request.snapshot
+            != _build_approval_snapshot(runtime, runtime.validated_proposal)
+        ):
+            self.approval_service.cancel(request_id)
+            self._pending_approval_request = None
+            runtime.record_rejection(
+                "invalid_correction_approval",
+                await_correction=False,
+            )
+            raise CorrectionApprovalError(
+                "El estado aprobado cambiÃ³ antes de la aplicaciÃ³n"
+            )
+        try:
+            validated = self.validator.validate(runtime.current_proposal)
+            self._validate_test_contract(validated)
+            self._check_accumulated_limits(runtime, validated)
+        except (ChangeValidationError, CorrectionBudgetExceededError) as exc:
+            self.approval_service.cancel(request_id)
+            self._pending_approval_request = None
+            runtime.record_rejection(
+                "correction_budget_exhausted"
+                if isinstance(exc, CorrectionBudgetExceededError)
+                else "invalid_correction_approval",
+                await_correction=False,
+            )
+            raise
+        if validated != runtime.validated_proposal:
+            self.approval_service.cancel(request_id)
+            self._pending_approval_request = None
+            runtime.record_rejection(
+                "invalid_correction_approval",
+                await_correction=False,
+            )
+            raise CorrectionApprovalError(
+                "La propuesta validada cambiÃ³ antes de la aplicaciÃ³n"
+            )
         decision = self.approval_service.decide(
             request_id,
             runtime_id=runtime_id,
@@ -487,6 +590,8 @@ class CorrectionEngine:
         if (
             request.runtime_id != runtime.runtime_id
             or request.proposal_id != runtime.validated_proposal.proposal_id
+            or request.snapshot
+            != _build_approval_snapshot(runtime, runtime.validated_proposal)
         ):
             raise CorrectionApprovalError(
                 "El servicio devolvió una solicitud incompatible"
@@ -501,7 +606,6 @@ class CorrectionEngine:
             )
             or dict(request.budget)
             != expected.calculated_budget.canonical_dict()
-            or request.risks != tuple(expected.proposal.risks)
         ):
             raise CorrectionApprovalError(
                 "El resumen de aprobación no coincide con la propuesta"

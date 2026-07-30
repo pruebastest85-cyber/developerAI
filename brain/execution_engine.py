@@ -7,10 +7,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from brain.approval_controller import ApprovalRequiredError
+from brain.change_proposal import ChangeProposal
 from brain.change_proposal_adapter import ChangeProposalAdaptationError
 from brain.correction_engine import CorrectionEngine
 from brain.correction_runtime import (
     CorrectionRuntimeState,
+    TERMINAL_CORRECTION_STATUSES,
 )
 from brain.correction_workflow import CorrectionWorkflowController
 from brain.execution_state import ExecutionState
@@ -667,15 +669,15 @@ class ExecutionEngine:
         self,
         plan: WorkflowPlan,
         runtime: WorkflowRuntimeState,
-        arguments: Dict[str, Any],
+        arguments: Dict[str, Any] | ChangeProposal,
     ) -> WorkflowRuntimeState:
         """Submit an explicit proposal to the correction step currently paused."""
         if not isinstance(plan, WorkflowPlan):
             raise TypeError("plan debe ser WorkflowPlan")
         if not isinstance(runtime, WorkflowRuntimeState):
             raise TypeError("runtime debe ser WorkflowRuntimeState")
-        if not isinstance(arguments, dict):
-            raise TypeError("arguments debe ser dict")
+        if not isinstance(arguments, (dict, ChangeProposal)):
+            raise TypeError("arguments debe ser dict o ChangeProposal")
         runtime.validate_for_plan(plan)
         step_id = runtime.awaiting_step_id
         if runtime.status != "awaiting_correction" or step_id is None:
@@ -695,7 +697,12 @@ class ExecutionEngine:
             )
 
         runtime.begin_correction_submission(step_id)
-        submitted_args = dict(arguments)
+        submitted_args = (
+            arguments
+            if isinstance(arguments, ChangeProposal)
+            else dict(arguments)
+        )
+        safe_logging = isinstance(submitted_args, ChangeProposal)
         try:
             correction_runtime = controller.submit_correction(submitted_args)
         except ApprovalRequiredError as exc:
@@ -710,6 +717,8 @@ class ExecutionEngine:
                 ArgumentResolver(),
                 step_id,
                 submitted_args,
+                safe_logging=safe_logging,
+                rejection_allows_correction=True,
             )
             raise
         except ChangeProposalAdaptationError:
@@ -722,6 +731,7 @@ class ExecutionEngine:
                 step,
                 submitted_args,
                 exc,
+                safe_logging=safe_logging,
             )
             raise
 
@@ -733,7 +743,98 @@ class ExecutionEngine:
             step_id,
             submitted_args,
             correction_runtime,
+            safe_logging=safe_logging,
         )
+
+    def abort_workflow_correction(
+        self,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        reason: str,
+    ) -> WorkflowRuntimeState:
+        """Close an authenticated suspended correction without applying data."""
+        if not isinstance(plan, WorkflowPlan) or not isinstance(
+            runtime, WorkflowRuntimeState
+        ):
+            raise TypeError("plan y runtime no son compatibles")
+        if type(reason) is not str or not reason:
+            raise ValueError("reason debe ser una cadena no vacía")
+        runtime.validate_for_plan(plan)
+        step_id = runtime.awaiting_step_id
+        if runtime.status != "awaiting_correction" or step_id is None:
+            raise WorkflowRuntimeTransitionError(
+                "El workflow no espera una corrección"
+            )
+        step_runtime = runtime.steps[step_id]
+        controller = step_runtime.correction_controller
+        correction_runtime = step_runtime.correction_runtime
+        if (
+            controller is None
+            or correction_runtime is None
+            or correction_runtime.status != "awaiting_correction"
+        ):
+            raise WorkflowRuntimeTransitionError(
+                "El paso no conserva una corrección suspendida"
+            )
+        correction_runtime.mark_failed(reason)
+        runtime.status = "running"
+        runtime.current_step_id = step_id
+        runtime.awaiting_step_id = None
+        step_runtime.status = "running"
+        step_runtime.reason = None
+        return self._complete_correction_state(
+            plan,
+            runtime,
+            WorkflowToolExecutor(self.agent, limits=self.workflow_limits),
+            ArgumentResolver(),
+            step_id,
+            {},
+            correction_runtime,
+            safe_logging=True,
+        )
+
+    def invalidate_workflow_correction_approval(
+        self,
+        plan: WorkflowPlan,
+        runtime: WorkflowRuntimeState,
+        step_id: str,
+        reason: str = "invalid_correction_approval",
+    ) -> WorkflowRuntimeState:
+        """Terminally invalidate a stale correction approval without resuming it."""
+        if not isinstance(plan, WorkflowPlan) or not isinstance(
+            runtime, WorkflowRuntimeState
+        ):
+            raise TypeError("plan y runtime no son compatibles")
+        if type(reason) is not str or not reason:
+            raise ValueError("reason debe ser una cadena no vacÃ­a")
+        runtime.validate_for_plan(plan)
+        if (
+            runtime.status != "awaiting_approval"
+            or type(step_id) is not str
+            or step_id not in runtime.steps
+        ):
+            raise WorkflowRuntimeTransitionError(
+                "El workflow no espera una aprobaciÃ³n"
+            )
+        step_runtime = runtime.steps[step_id]
+        controller = step_runtime.correction_controller
+        correction_runtime = step_runtime.correction_runtime
+        if (
+            not isinstance(controller, CorrectionWorkflowController)
+            or not isinstance(correction_runtime, CorrectionRuntimeState)
+            or correction_runtime.status != "awaiting_approval"
+        ):
+            raise WorkflowRuntimeTransitionError(
+                "El paso no conserva una aprobaciÃ³n correctiva pendiente"
+            )
+        closed = controller.engine.cancel(reason)
+        if closed is not correction_runtime or closed.status != "cancelled":
+            raise WorkflowRuntimeTransitionError(
+                "La correcciÃ³n no pudo invalidarse coherentemente"
+            )
+        step_runtime.correction_runtime = closed
+        runtime.mark_cancelled(step_id, reason)
+        return runtime
 
     def _start_correction_step(
         self,
@@ -864,6 +965,7 @@ class ExecutionEngine:
         resolved_args: Dict[str, Any],
         *,
         safe_logging: bool = False,
+        rejection_allows_correction: bool = False,
     ) -> None:
         approved_action = error.execute
         cancelled_action = error.on_cancel
@@ -895,11 +997,30 @@ class ExecutionEngine:
                 raise
 
         def cancel_pending(reason: str) -> None:
-            try:
-                if cancelled_action is not None:
-                    cancelled_action(reason)
-            finally:
-                runtime.mark_cancelled(step_id, reason)
+            outcome = (
+                cancelled_action(reason)
+                if cancelled_action is not None
+                else None
+            )
+            if (
+                rejection_allows_correction
+                and reason == "rejected"
+                and isinstance(outcome, CorrectionRuntimeState)
+                and outcome.status == "awaiting_correction"
+            ):
+                runtime.steps[step_id].correction_runtime = outcome
+                runtime.mark_awaiting_correction(
+                    step_id,
+                    outcome.terminal_reason,
+                )
+                return
+            if (
+                isinstance(outcome, CorrectionRuntimeState)
+                and outcome.status not in TERMINAL_CORRECTION_STATUSES
+            ):
+                outcome.mark_cancelled(reason)
+                runtime.steps[step_id].correction_runtime = outcome
+            runtime.mark_cancelled(step_id, reason)
 
         def record_request(request_id: str) -> None:
             runtime.record_approval_request(step_id, request_id)

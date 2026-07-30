@@ -40,9 +40,13 @@ class DeveloperAgent:
         *,
         model_planning_service=None,
         model_plan_review_controller=None,
+        model_correction_service=None,
+        model_correction_adapter=None,
     ):
         self.client = client
         self.model_planning_service = model_planning_service
+        self.model_correction_service = model_correction_service
+        self.model_correction_adapter = model_correction_adapter
         self.memory_file = memory_file
         self.prompt_dir = Path(prompt_dir or "prompts")
         self.base_dir = Path(base_dir or ".").resolve()
@@ -70,6 +74,13 @@ class DeveloperAgent:
         )
         self.tool_router = ToolRouter(self)
         self.execution_engine = ExecutionEngine(self)
+        if self.model_correction_service is not None and self.model_correction_adapter is None:
+            from brain.model_correction import ModelCorrectionAdapter
+
+            self.model_correction_adapter = ModelCorrectionAdapter(
+                self.base_dir,
+                limits=self.execution_engine.workflow_limits,
+            )
         if model_plan_review_controller is None:
             from brain.model_plan_review import ModelPlanReviewController
 

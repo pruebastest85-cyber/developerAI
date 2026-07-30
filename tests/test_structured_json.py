@@ -130,13 +130,25 @@ class StructuredOutputSchemaTests(unittest.TestCase):
             {"type": "object", "properties": {}, "additionalProperties": True},
             {"type": "string", "$ref": "#"},
             {"type": "string", "items": {"type": "string"}},
-            {"type": ["string", "null"]},
+            {"type": ["integer", "null"]},
             {"type": "array"},
         ]
         for schema in invalid:
             with self.subTest(schema=schema):
                 with self.assertRaises(SchemaValidationError):
                     StructuredOutputSchema("x", schema)
+
+    def test_supports_closed_nullable_string_for_structured_contracts(self):
+        schema = StructuredOutputSchema(
+            "nullable",
+            {"type": ["string", "null"], "maxLength": 3},
+        )
+        schema.validate(None)
+        schema.validate("abc")
+        with self.assertRaises(SchemaValidationError):
+            schema.validate("abcd")
+        with self.assertRaises(SchemaValidationError):
+            schema.validate(1)
 
     def test_rejects_recursive_schema(self):
         schema = {"type": "array"}

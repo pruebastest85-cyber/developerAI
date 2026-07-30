@@ -248,6 +248,80 @@ class CorrectionEngineTests(unittest.TestCase):
                 approved=1,
             )
 
+    def test_approval_snapshot_blocks_all_mutated_budget_state_before_apply(self):
+        mutations = (
+            lambda runtime: setattr(runtime, "total_write_bytes", 1),
+            lambda runtime: setattr(runtime, "total_changed_lines", 1),
+            lambda runtime: setattr(runtime, "modified_files", frozenset({"old.py"})),
+            lambda runtime: setattr(runtime, "new_files", frozenset({"old.py"})),
+            lambda runtime: setattr(runtime, "correction_iterations", 1),
+            lambda runtime: setattr(runtime, "test_runs", (object(),)),
+            lambda runtime: setattr(runtime, "applied_proposal_ids", frozenset({"old"})),
+            lambda runtime: setattr(
+                runtime,
+                "limits",
+                WorkflowLimits(max_total_change_bytes=1),
+            ),
+            lambda runtime: setattr(runtime, "runtime_id", "mutated-runtime"),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                approvals = InMemoryCorrectionApprovalService(
+                    id_factory=lambda: f"snapshot-{index}"
+                )
+                transaction = FakeTransaction()
+                engine = CorrectionEngine(
+                    self.root,
+                    approval_service=approvals,
+                    test_runner=FakeTestRunner([]),
+                    transaction=transaction,
+                    runtime_id_factory=lambda: "runtime",
+                )
+                runtime = engine.start("goal", make_proposal(f"file-{index}.py"))
+                request_id = runtime.pending_approval_request_id
+                proposal_id = runtime.current_proposal.proposal_id
+                mutate(runtime)
+
+                with self.assertRaises(CorrectionApprovalError):
+                    engine.resume(
+                        request_id,
+                        runtime_id=runtime.runtime_id,
+                        proposal_id=proposal_id,
+                        approved=True,
+                    )
+
+                self.assertEqual(transaction.calls, [])
+                self.assertEqual(runtime.status, "cancelled")
+                self.assertIsNone(runtime.pending_approval_request_id)
+
+    def test_accumulated_byte_limit_allows_exact_boundary_and_rejects_plus_one(self):
+        limits = WorkflowLimits(max_total_change_bytes=2)
+        transaction = FakeTransaction()
+        engine = self._engine(
+            [failed_result(), ok_result(), ok_result()],
+            limits=limits,
+            transaction=transaction,
+        )
+        runtime = engine.start("goal", make_proposal("one.py", content="x"))
+        self._approve(engine)
+
+        runtime.total_write_bytes = 1
+        engine.submit_correction(make_proposal("two.py", content="x"))
+        self.assertEqual(runtime.status, "awaiting_approval")
+        self._approve(engine)
+        self.assertEqual(len(transaction.calls), 2)
+
+        other = self._engine(
+            [failed_result()],
+            limits=limits,
+            transaction=FakeTransaction(),
+        )
+        other_runtime = other.start("goal", make_proposal("three.py", content="xx"))
+        self._approve(other)
+        other.submit_correction(make_proposal("four.py", content="x"))
+        self.assertEqual(other_runtime.status, "awaiting_correction")
+        self.assertIsNone(other_runtime.pending_approval_request_id)
+
     def test_approval_summary_must_match_validated_proposal(self):
         class WrongSummaryApprovalService(InMemoryCorrectionApprovalService):
             def request(self, runtime, validated):
@@ -258,7 +332,6 @@ class CorrectionEngineTests(unittest.TestCase):
                     goal=runtime.goal,
                     changes=(),
                     budget=validated.calculated_budget.canonical_dict(),
-                    risks=tuple(validated.proposal.risks),
                 )
 
         engine = CorrectionEngine(
