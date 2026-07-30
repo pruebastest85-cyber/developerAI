@@ -305,6 +305,41 @@ class ModelCorrectionServiceTests(unittest.TestCase):
         self.assertNotIn("session_id", serialized)
         self.assertNotIn("runtime_id", serialized)
 
+    def test_prompt_json_uses_correction_schema_and_strict_shared_boundary(self):
+        transport = FakeTransport(draft())
+        client = LocalModelClient(
+            LocalModelConfig(
+                provider="lm_studio",
+                base_url="http://localhost:1234/v1",
+                model="qwen",
+                structured_format="prompt_json",
+            ),
+            transport=transport,
+            clock=iter([1.0, 1.1]).__next__,
+        )
+        context = ModelCorrectionContext(
+            session_id="session",
+            runtime_id="runtime",
+            step_id="correct",
+            goal="Fix tests",
+            failure_code="tests_failed",
+            remaining_files=5,
+            remaining_bytes=1024,
+            remaining_lines=100,
+        )
+        result = ModelCorrectionService(client).propose(context)
+        self.assertIs(type(result.draft), ModelCorrectionProposalDraft)
+        sent = json.loads(transport.requests[0].body)
+        self.assertNotIn("response_format", sent)
+        canonical = json.dumps(
+            MODEL_CORRECTION_OUTPUT_SCHEMA.to_openai_schema(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self.assertIn(canonical, sent["messages"][0]["content"])
+        self.assertEqual(len(transport.requests), 1)
+
     def test_direct_service_invocation_has_no_execution_authority(self):
         transport = FakeTransport(draft())
         client = LocalModelClient(

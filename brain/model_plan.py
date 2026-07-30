@@ -10,6 +10,7 @@ from typing import Any
 
 from brain.structured_json import StructuredOutputSchema
 from brain.workflow_plan import StepSpec, WorkflowPlan, WorkflowValidationError
+from brain.change_proposal import TEST_ID_PATTERN
 
 
 ROOT_FIELDS = frozenset(
@@ -220,7 +221,13 @@ SAFE_MODEL_OPERATION_CATALOG = MappingProxyType(
                 ),
             }
         ),
-        ("test_runner", "run_tests"): ModelOperationContract(),
+        ("test_runner", "run_tests"): ModelOperationContract(
+            {
+                "test_id": ModelArgumentContract(
+                    "string", min_length=3, max_length=512
+                ),
+            }
+        ),
         ("git_tools", "status"): ModelOperationContract(),
     }
 )
@@ -277,6 +284,11 @@ MODEL_PLAN_OUTPUT_SCHEMA = StructuredOutputSchema(
                                 "new_content": {
                                     "type": "string",
                                     "maxLength": 256 * 1024,
+                                },
+                                "test_id": {
+                                    "type": "string",
+                                    "minLength": 3,
+                                    "maxLength": 512,
                                 },
                             },
                             "required": [],
@@ -463,6 +475,13 @@ class ModelPlanAdapter:
             if contract is None:
                 raise ModelPlanAdaptationError("unknown_action")
             if not _arguments_match(model_step.args, contract):
+                raise ModelPlanAdaptationError("invalid_arguments")
+            if (
+                (model_step.tool, model_step.action)
+                == ("test_runner", "run_tests")
+                and "test_id" in model_step.args
+                and not TEST_ID_PATTERN.fullmatch(model_step.args["test_id"])
+            ):
                 raise ModelPlanAdaptationError("invalid_arguments")
             steps.append(
                 StepSpec(

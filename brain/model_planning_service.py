@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -132,31 +131,4 @@ def _serialized_request_body(
     request: StructuredModelRequest,
 ) -> bytes:
     """Serialize exactly the body whose size LocalModelClient enforces."""
-    tokens, temperature = model_client._request_values(request)
-    if model_client.config.structured_format == "json_schema":
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": request.output_schema.name,
-                "strict": True,
-                "schema": request.output_schema.to_openai_schema(),
-            },
-        }
-    else:
-        response_format = {"type": "json_object"}
-    payload = {
-        "model": model_client.config.model,
-        "messages": [
-            {"role": item.role, "content": item.content}
-            for item in request.messages
-        ],
-        "temperature": temperature,
-        "max_tokens": tokens,
-        "response_format": response_format,
-    }
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
+    return model_client._serialized_request_body(request)

@@ -15,6 +15,8 @@ from brain.correction_engine import (
     InMemoryCorrectionApprovalService,
 )
 from brain.correction_runtime import CorrectionRuntimeState
+from brain.change_proposal import TestSpec
+from tools.tool_result import ToolResult
 
 
 class CorrectionWorkflowConfigurationError(ValueError):
@@ -77,6 +79,32 @@ class CorrectionWorkflowController:
         )
         runtime = self.engine.submit_correction(proposal)
         return self._suspend_if_required(runtime)
+
+    def start_from_test_failure(
+        self,
+        goal: str,
+        test_spec: TestSpec,
+        result: ToolResult,
+        *,
+        initial_plan_identity,
+        execution_event=None,
+        workflow_plan=None,
+        workflow_runtime=None,
+        workflow_step=None,
+        execution_authority=None,
+    ) -> CorrectionRuntimeState:
+        """System-only bridge from an executed test failure to correction."""
+        return self.engine.start_from_test_failure(
+            goal,
+            test_spec,
+            result,
+            initial_plan_identity=initial_plan_identity,
+            execution_event=execution_event,
+            workflow_plan=workflow_plan,
+            workflow_runtime=workflow_runtime,
+            workflow_step=workflow_step,
+            execution_authority=execution_authority,
+        )
 
     def resume(
         self,

@@ -19,6 +19,14 @@ from brain.structured_json import (
 MAX_MESSAGES = 64
 MAX_MODEL_NAME_LENGTH = 256
 MAX_METADATA_TEXT_LENGTH = 128
+PROMPT_JSON_INSTRUCTION = (
+    "Return exclusively one JSON document that validates against the JSON "
+    "Schema below. Do not use Markdown, code fences, comments, prefixes, "
+    "suffixes, explanations, or any text outside the JSON document. "
+    "Include every required field and do not include additional properties "
+    "that the schema does not permit. "
+    "JSON Schema:"
+)
 
 
 def _safe_identifier(value):
@@ -150,7 +158,7 @@ class ModelResponseMetadata:
         if (
             not is_valid_endpoint_id(self.endpoint_id, self.provider)
             or not isinstance(self.structured_format, str)
-            or self.structured_format not in {"json_schema", "json_object"}
+            or self.structured_format not in {"json_schema", "prompt_json"}
         ):
             raise ModelConfigurationError(code="invalid_response_metadata")
         object.__setattr__(self, "duration_seconds", float(self.duration_seconds))
@@ -200,25 +208,53 @@ class LocalModelClient:
     def _token(value):
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
-    def _request_values(self, request):
+    def _request_values(self, request, config=None):
+        config = self.config if config is None else config
         if not isinstance(request, StructuredModelRequest):
             raise ModelConfigurationError(code="invalid_request")
         tokens = request.max_output_tokens
         if tokens is None:
-            tokens = self.config.max_output_tokens
-        if isinstance(tokens, bool) or not isinstance(tokens, int) or not 0 < tokens <= self.config.max_output_tokens:
+            tokens = config.max_output_tokens
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or not 0 < tokens <= config.max_output_tokens:
             raise ModelConfigurationError(code="invalid_max_output_tokens")
-        temperature = self.config.temperature if request.temperature is None else request.temperature
+        temperature = config.temperature if request.temperature is None else request.temperature
         if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
             raise ModelConfigurationError(code="invalid_temperature")
         if not math.isfinite(temperature) or not 0 <= temperature <= 2:
             raise ModelConfigurationError(code="invalid_temperature")
         return tokens, float(temperature)
 
-    def complete(self, request: StructuredModelRequest) -> StructuredModelResponse:
-        tokens, temperature = self._request_values(request)
+    @staticmethod
+    def _prompt_json_messages(request, schema):
+        schema_text = json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        instruction = f"{PROMPT_JSON_INSTRUCTION}\n{schema_text}"
+        messages = [
+            {"role": item.role, "content": item.content}
+            for item in request.messages
+        ]
+        for message in messages:
+            if message["role"] == "system":
+                message["content"] = f"{message['content']}\n\n{instruction}"
+                return messages
+        if len(messages) >= MAX_MESSAGES:
+            raise ModelConfigurationError(code="invalid_messages")
+        return [{"role": "system", "content": instruction}, *messages]
+
+    def _request_payload(self, request, config=None):
+        config = self.config if config is None else config
+        tokens, temperature = self._request_values(request, config)
         schema = request.output_schema.to_openai_schema()
-        if self.config.structured_format == "json_schema":
+        if config.structured_format == "json_schema":
+            messages = [
+                {"role": item.role, "content": item.content}
+                for item in request.messages
+            ]
             response_format = {
                 "type": "json_schema",
                 "json_schema": {
@@ -228,46 +264,50 @@ class LocalModelClient:
                 },
             }
         else:
-            response_format = {"type": "json_object"}
+            messages = self._prompt_json_messages(request, schema)
+            response_format = None
         payload = {
-            "model": self.config.model,
-            "messages": [
-                {"role": item.role, "content": item.content}
-                for item in request.messages
-            ],
+            "model": config.model,
+            "messages": messages,
             "temperature": temperature,
             "max_tokens": tokens,
-            "response_format": response_format,
         }
-        serialization_failed = False
+        if response_format is not None:
+            payload["response_format"] = response_format
+        return payload
+
+    def _serialized_request_body(self, request, config=None):
+        payload = self._request_payload(request, config)
         try:
-            body = json.dumps(
+            return json.dumps(
                 payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
             ).encode("utf-8")
         except (TypeError, ValueError):
-            serialization_failed = True
-        if serialization_failed:
             raise ModelConfigurationError(
                 code="request_serialization_failed"
             ) from None
-        if len(body) > self.config.max_prompt_bytes:
+
+    def complete(self, request: StructuredModelRequest) -> StructuredModelResponse:
+        config = self.config
+        body = self._serialized_request_body(request, config)
+        if len(body) > config.max_prompt_bytes:
             raise ModelConfigurationError(code="prompt_too_large")
         headers = [
             ("Accept", "application/json"),
             ("Accept-Encoding", "identity"),
             ("Content-Type", "application/json"),
-            ("Host", url_host_header(self.config.base_url)),
+            ("Host", url_host_header(config.base_url)),
         ]
-        if self.config.api_key:
-            headers.append(("Authorization", f"Bearer {self.config.api_key}"))
+        if config.api_key:
+            headers.append(("Authorization", f"Bearer {config.api_key}"))
         transport_request = TransportRequest(
             method="POST",
-            url=f"{self.config.base_url}/chat/completions",
+            url=f"{config.base_url}/chat/completions",
             headers=tuple(headers),
             body=body,
-            connect_timeout_seconds=self.config.connect_timeout_seconds,
-            read_timeout_seconds=self.config.read_timeout_seconds,
-            max_response_bytes=self.config.max_http_body_bytes,
+            connect_timeout_seconds=config.connect_timeout_seconds,
+            read_timeout_seconds=config.read_timeout_seconds,
+            max_response_bytes=config.max_http_body_bytes,
         )
         started = self._clock()
         response = self.transport.send(transport_request)
@@ -276,8 +316,8 @@ class LocalModelClient:
         try:
             text = response.body.decode("utf-8")
             envelope = strict_json_loads(
-                text, max_bytes=self.config.max_http_body_bytes,
-                max_depth=self.config.max_json_depth,
+                text, max_bytes=config.max_http_body_bytes,
+                max_depth=config.max_json_depth,
             )
         except (UnicodeError, StructuredOutputError):
             malformed_envelope = True
@@ -306,15 +346,15 @@ class LocalModelClient:
         if not isinstance(content, str):
             raise MissingContentError()
         data = strict_json_loads(
-            content, max_bytes=self.config.max_content_bytes,
-            max_depth=self.config.max_json_depth,
+            content, max_bytes=config.max_content_bytes,
+            max_depth=config.max_json_depth,
         )
         request.output_schema.validate(data)
         usage = envelope.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         metadata = ModelResponseMetadata(
-            provider=self.config.provider,
-            requested_model=self.config.model,
+            provider=config.provider,
+            requested_model=config.model,
             reported_model=_safe_identifier(envelope.get("model")),
             request_id=_safe_identifier(envelope.get("id")),
             input_tokens=self._token(usage.get("prompt_tokens", usage.get("input_tokens"))),
@@ -322,8 +362,8 @@ class LocalModelClient:
             total_tokens=self._token(usage.get("total_tokens")),
             finish_reason=_safe_identifier(choice.get("finish_reason")),
             duration_seconds=duration,
-            endpoint_id=self.config.endpoint_id,
-            structured_format=self.config.structured_format,
+            endpoint_id=config.endpoint_id,
+            structured_format=config.structured_format,
         )
         return StructuredModelResponse(data, metadata)
 

@@ -10,7 +10,7 @@ from brain.model_errors import EndpointPolicyError, ModelConfigurationError
 
 ALLOWED_PROVIDERS = frozenset({"lm_studio", "openai_compatible"})
 ALLOWED_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.internal"})
-ALLOWED_STRUCTURED_FORMATS = frozenset({"json_schema", "json_object"})
+ALLOWED_STRUCTURED_FORMATS = frozenset({"json_schema", "prompt_json"})
 MAX_API_KEY_LENGTH = 512
 MAX_ENDPOINT_ID_LENGTH = 256
 
@@ -154,6 +154,11 @@ class LocalModelConfig:
             self.provider, parsed.hostname, parsed.port
         )
 
+    @property
+    def structured_output_mode(self) -> str:
+        """Explicit structured-output policy, retaining the historical field."""
+        return self.structured_format
+
     def to_dict(self) -> dict:
         return {
             "provider": self.provider,
@@ -187,6 +192,9 @@ class LocalModelConfig:
                 read_timeout_seconds=float(values.get(
                     "DEVELOPERAI_MODEL_READ_TIMEOUT", "120"
                 )),
+                structured_format=values.get(
+                    "DEVELOPERAI_MODEL_STRUCTURED_OUTPUT_MODE", "json_schema"
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise ModelConfigurationError(code="invalid_environment") from exc

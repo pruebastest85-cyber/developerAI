@@ -311,7 +311,7 @@ class ModelCorrectionSessionIntegrationTests(unittest.TestCase):
                 paused.pending_approval_request_id,
             )
 
-    def test_rejection_writes_nothing_and_requests_a_new_bounded_draft(self):
+    def test_rejection_is_terminal_without_writing_or_regeneration(self):
         self.service.drafts.append(correction_draft(self.target, "value = 3\n"))
         self.session._synchronize_runtime()
         first = self.session.current_result()
@@ -321,13 +321,11 @@ class ModelCorrectionSessionIntegrationTests(unittest.TestCase):
             first.pending_approval_request_id,
         )
 
-        self.assertEqual(second.state, ProgrammingSessionState.AWAITING_APPROVAL)
+        self.assertEqual(second.state, ProgrammingSessionState.FAILED)
+        self.assertEqual(second.runtime_status, "failed")
         self.assertEqual(self.target.read_text(encoding="utf-8"), "value = 1\n")
-        self.assertEqual(len(self.service.contexts), 2)
-        self.assertNotEqual(
-            first.pending_approval_request_id,
-            second.pending_approval_request_id,
-        )
+        self.assertEqual(len(self.service.contexts), 1)
+        self.assertIsNone(second.pending_approval_request_id)
 
     def test_cancel_is_terminal_without_rejection_or_new_model_generation(self):
         self.service.drafts.append(correction_draft(self.target, "value = 3\n"))

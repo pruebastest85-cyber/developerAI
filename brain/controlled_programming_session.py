@@ -52,7 +52,10 @@ TERMINAL_SESSION_STATES = frozenset(
 )
 
 _TRANSITIONS = {
-    ProgrammingSessionState.IDLE: {ProgrammingSessionState.PENDING_PLAN},
+    ProgrammingSessionState.IDLE: {
+        ProgrammingSessionState.PENDING_PLAN,
+        ProgrammingSessionState.FAILED,
+    },
     ProgrammingSessionState.PENDING_PLAN: {
         ProgrammingSessionState.RUNNING,
         ProgrammingSessionState.REJECTED,
@@ -125,6 +128,8 @@ class ControlledProgrammingResult:
     plan_id: str | None = None
     plan: ModelPlanReviewView | None = None
     runtime_status: str | None = None
+    workflow_runtime_id: str | None = None
+    correction_applications: int = 0
     pending_approval_request_id: str | None = None
     pending_correction_step_id: str | None = None
     report: WorkflowReport | None = None
@@ -171,6 +176,7 @@ class ControlledProgrammingSession:
         self._plan_review_controller = agent.model_plan_review_controller
         self._approval_controller = ApprovalController(agent)
         self._session_id = uuid.uuid4().hex
+        self._execution_epoch = 0
         self._state = ProgrammingSessionState.IDLE
         self._plan_id: str | None = None
         self._plan_view: ModelPlanReviewView | None = None
@@ -267,16 +273,20 @@ class ControlledProgrammingSession:
         if type(user_request) is not str or not user_request.strip():
             raise ControlledProgrammingSessionError("invalid_request")
         if self._agent.model_planning_service is None:
+            self._fail("planning_failed")
             raise ControlledProgrammingSessionError("planning_failed")
         if self._state in TERMINAL_SESSION_STATES:
             self._begin_new_cycle()
+        self._execution_epoch += 1
 
         try:
             planning_result = self._agent.model_planning_service.plan(user_request)
             plan_view = self._plan_review_controller.register(planning_result)
         except (ModelPlanReviewError, TypeError, ValueError):
+            self._fail("planning_failed")
             raise ControlledProgrammingSessionError("planning_failed") from None
         except Exception:
+            self._fail("planning_failed")
             raise ControlledProgrammingSessionError("planning_failed") from None
 
         self._reset_runtime_fields()
@@ -290,6 +300,10 @@ class ControlledProgrammingSession:
         self._require_state(ProgrammingSessionState.PENDING_PLAN)
         self._require_plan_id(plan_id)
         self._transition(ProgrammingSessionState.RUNNING, "plan_approved")
+        capability = self._agent.execution_engine._authorize_controlled_execution(
+            self,
+            self._workflow_plan,
+        )
         try:
             runtime = self._plan_review_controller.approve(plan_id)
         except ApprovalRequiredError as error:
@@ -303,6 +317,10 @@ class ControlledProgrammingSession:
             self._runtime = self._agent.execution_engine.last_workflow_runtime
             self._fail("execution_failed")
             raise
+        finally:
+            self._agent.execution_engine._discard_controlled_execution(
+                capability
+            )
 
         self._runtime = runtime
         self._synchronize_runtime()
@@ -345,6 +363,7 @@ class ControlledProgrammingSession:
                 self._pending_model_correction = None
                 self._synchronize_runtime()
         elif action in {"rechazar", "cancelar"}:
+            rejected_model_correction = self._pending_model_correction is not None
             operation = (
                 self._approval_controller.reject
                 if action == "rechazar"
@@ -360,6 +379,17 @@ class ControlledProgrammingSession:
             self._approval_request_id = None
             if result.status not in {"rejected", "cancelled"}:
                 raise ControlledProgrammingSessionError("approval_consumed")
+            if (
+                rejected_model_correction
+                and self._runtime is not None
+                and self._runtime.status == "awaiting_correction"
+            ):
+                plan, runtime = self._require_plan_runtime()
+                self._agent.execution_engine.abort_workflow_correction(
+                    plan,
+                    runtime,
+                    action,
+                )
             self._synchronize_runtime(expected_cancel=True)
         else:
             raise ControlledProgrammingSessionError("invalid_command")
@@ -429,12 +459,23 @@ class ControlledProgrammingSession:
             and self._runtime is not None
             else None
         )
+        correction_applications = 0
+        if self._runtime is not None:
+            correction_applications = sum(
+                len(step.correction_runtime.applied_proposal_ids)
+                for step in self._runtime.steps.values()
+                if step.correction_runtime is not None
+            )
         return ControlledProgrammingResult(
             session_id=self._session_id,
             state=self._state,
             plan_id=self._plan_id,
             plan=self._plan_view,
             runtime_status=runtime_status,
+            workflow_runtime_id=(
+                self._runtime.runtime_id if self._runtime is not None else None
+            ),
+            correction_applications=correction_applications,
             pending_approval_request_id=self._approval_request_id,
             pending_correction_step_id=correction_step,
             report=self._report,
@@ -472,6 +513,17 @@ class ControlledProgrammingSession:
 
     def get_session_state(self) -> str:
         return self._state.value
+
+    def _execution_authority_context(self) -> tuple:
+        """Return identity-only state consumed by the internal execution registry."""
+        return (
+            self._session_id,
+            self._execution_epoch,
+            self._plan_id,
+            self._workflow_plan,
+            self._runtime,
+            self._state.value,
+        )
 
     def is_session_active(self) -> bool:
         return self._state not in {ProgrammingSessionState.IDLE, *TERMINAL_SESSION_STATES}
@@ -625,9 +677,18 @@ class ControlledProgrammingSession:
         )
         if (
             step is None
-            or step.tool != "correction_workflow"
             or correction_runtime is None
             or correction_runtime.status != "awaiting_correction"
+            or not (
+                step.tool == "correction_workflow"
+                or (
+                    step.tool == "test_runner"
+                    and step.action == "run_tests"
+                    and type(step.args.get("test_id")) is str
+                    and correction_runtime.initial_plan_identity
+                    == runtime.plan_identity
+                )
+            )
         ):
             raise ControlledProgrammingSessionError("inconsistent_runtime")
 
@@ -747,6 +808,8 @@ class ControlledProgrammingSession:
                 )
                 for change in current.changes
             )
+        else:
+            sources = self._trusted_runtime_sources(runtime)
         failed_test_ids = ()
         if correction_runtime.test_runs:
             data = correction_runtime.test_runs[-1].result.data
@@ -790,9 +853,55 @@ class ControlledProgrammingSession:
     def _trusted_correction_tests(correction_runtime) -> tuple[TestSpec, ...]:
         proposal = correction_runtime.current_proposal
         if proposal is None:
-            return (TestSpec("full"),)
+            focused = tuple(
+                run.test_spec
+                for run in correction_runtime.test_runs
+                if isinstance(run.test_spec, TestSpec)
+                and run.test_spec.scope == "focused"
+            )
+            return (*focused, TestSpec("full"))
         focused = tuple(test for test in proposal.tests if test.scope == "focused")
         return (*focused, TestSpec("full"))
+
+    def _trusted_runtime_sources(
+        self,
+        runtime: WorkflowRuntimeState,
+    ) -> tuple[ModelCorrectionSource, ...]:
+        plan = self._workflow_plan
+        adapter = self._agent.model_correction_adapter
+        if plan is None or adapter is None:
+            return ()
+        sources = []
+        for step in plan.steps:
+            if step.tool != "code_reader" or step.action != "read_file":
+                continue
+            result = runtime.results.get(step.id)
+            path = step.args.get("path")
+            if (
+                result is None
+                or result.status != "ok"
+                or type(result.data) is not str
+                or type(path) is not str
+            ):
+                continue
+            try:
+                resolved = adapter.path_policy.resolve_for_read(path)
+                payload = resolved.absolute.read_bytes()
+                current = payload.decode("utf-8")
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if current != result.data:
+                continue
+            sources.append(
+                ModelCorrectionSource(
+                    path=resolved.relative.as_posix(),
+                    current_content=current,
+                    current_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+            )
+            if len(sources) >= 5:
+                break
+        return tuple(sources)
 
     @staticmethod
     def _public_correction_summary(validated, tests) -> str:

@@ -92,7 +92,14 @@ class FakeTransport:
 
 
 class ModelPlanningServiceTests(unittest.TestCase):
-    def make(self, payload=None, *, transport=None, adapter=None):
+    def make(
+        self,
+        payload=None,
+        *,
+        transport=None,
+        adapter=None,
+        structured_format="json_schema",
+    ):
         transport = transport or FakeTransport(
             envelope(decision() if payload is None else payload)
         )
@@ -101,6 +108,7 @@ class ModelPlanningServiceTests(unittest.TestCase):
                 provider="lm_studio",
                 base_url="http://localhost:1234/v1",
                 model="qwen",
+                structured_format=structured_format,
             ),
             transport=transport,
             clock=iter([1.0, 1.1]).__next__,
@@ -186,6 +194,45 @@ class ModelPlanningServiceTests(unittest.TestCase):
         result = self.make(completed)[0].plan("Check")
         self.assertTrue(result.decision.completed)
         self.assertEqual(result.workflow.steps, ())
+
+    def test_prompt_json_uses_same_validated_plan_without_response_format(self):
+        service, transport, _ = self.make(structured_format="prompt_json")
+        result = service.plan("Inspect the agent")
+        self.assertIs(type(result), ModelPlanningResult)
+        sent = json.loads(transport.requests[0].body)
+        self.assertNotIn("response_format", sent)
+        self.assertEqual(sent["messages"][1], {
+            "role": "user",
+            "content": "Inspect the agent",
+        })
+        self.assertIn(
+            '"additionalProperties":false',
+            sent["messages"][0]["content"],
+        )
+        self.assertEqual(result.metadata.structured_format, "prompt_json")
+
+    def test_prompt_json_preflight_and_client_use_identical_body(self):
+        service, transport, client = self.make(
+            structured_format="prompt_json"
+        )
+        bodies = []
+        original = client._serialized_request_body
+
+        def capture(*args, **kwargs):
+            body = original(*args, **kwargs)
+            bodies.append(body)
+            return body
+
+        with mock.patch.object(
+            client, "_serialized_request_body", side_effect=capture
+        ) as serialize:
+            service.plan("Inspect")
+        self.assertEqual(serialize.call_count, 2)
+        self.assertEqual(bodies, [transport.requests[0].body] * 2)
+        self.assertNotIn(
+            "response_format",
+            json.loads(transport.requests[0].body),
+        )
 
     def test_structural_model_failures_remain_local_model_errors(self):
         cases = [

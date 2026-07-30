@@ -150,6 +150,46 @@ class FakeTransaction:
 
 
 class CorrectionEngineTests(unittest.TestCase):
+    def test_manually_constructed_red_result_cannot_seed_correction_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_identity = (("plan", "ordinary"),)
+            engine = CorrectionEngine(directory)
+            red = failed_result()
+
+            with self.assertRaises(CorrectionTestResultError):
+                engine.start_from_test_failure(
+                    "repair",
+                    FOCUSED,
+                    red,
+                    initial_plan_identity=plan_identity,
+                )
+            self.assertIsNone(engine.runtime)
+
+    def test_test_failure_seed_rejects_nonred_nonfocused_and_operational_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cases = (
+                (FULL, failed_result()),
+                (FOCUSED, ok_result()),
+                (FOCUSED, failed_result(reason="timeout")),
+                (
+                    FOCUSED,
+                    ToolResult.failure(
+                        "other_tool",
+                        error="failed",
+                        data={"tests_run": 1, "failures": 1, "errors": 0},
+                    ),
+                ),
+            )
+            for spec, result in cases:
+                with self.subTest(spec=spec.scope, status=result.status):
+                    with self.assertRaises(CorrectionTestResultError):
+                        CorrectionEngine(directory).start_from_test_failure(
+                            "repair",
+                            spec,
+                            result,
+                            initial_plan_identity=(("plan", "ordinary"),),
+                        )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

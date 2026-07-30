@@ -665,6 +665,22 @@ class ModelPlanTests(unittest.TestCase):
         self.assertEqual(adapter.adapt(decision).steps[0].id, "inspect_1")
         self.assertEqual(decision.steps[0].id, "inspect_1")
 
+    def test_focused_test_identifier_is_validated_before_execution(self):
+        invalid = decision_payload(
+            steps=[
+                step_payload(
+                    tool="test_runner",
+                    action="run_tests",
+                    args={"test_id": "not a unittest id"},
+                )
+            ]
+        )
+        with self.assertRaises(ModelPlanAdaptationError) as caught:
+            ModelPlanAdapter(SAFE_MODEL_OPERATION_CATALOG).adapt(
+                ModelPlanDecision.from_mapping(invalid)
+            )
+        self.assertEqual(caught.exception.code, "invalid_arguments")
+
     def test_output_schema_is_exact_closed_and_bounded(self):
         schema = MODEL_PLAN_OUTPUT_SCHEMA.to_openai_schema()
         self.assertEqual(schema["type"], "object")
@@ -709,7 +725,8 @@ class ModelPlanTests(unittest.TestCase):
         self.assertFalse(args["additionalProperties"])
         self.assertEqual(args["required"], [])
         self.assertEqual(
-            set(args["properties"]), {"path", "max_lines", "new_content"}
+            set(args["properties"]),
+            {"path", "max_lines", "new_content", "test_id"},
         )
         self.assertEqual(
             set(step["properties"]["tool"]["enum"]),

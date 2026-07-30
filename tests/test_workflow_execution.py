@@ -55,6 +55,48 @@ class WorkflowExecutionTests(unittest.TestCase):
         )
         return controller, requested
 
+    def test_direct_workflow_cannot_activate_test_failure_correction_bridge(self):
+        correction_factory = mock.Mock(
+            side_effect=AssertionError("correction bridge must not start")
+        )
+        self.engine.correction_controller_factory = correction_factory
+        self.agent.test_runner.execute = (
+            lambda args=None, structured=False: ToolResult.failure(
+                "test_runner",
+                error="test failure",
+                data={
+                    "tests_run": 1,
+                    "failures": 1,
+                    "errors": 0,
+                    "skipped": 0,
+                    "passed": 0,
+                    "returncode": 1,
+                    "timed_out": False,
+                },
+                retryable=True,
+            )
+        )
+        test_step = StepSpec(
+            id="focused",
+            tool="test_runner",
+            action="run_tests",
+            args={"test_id": "tests.test_sample.SampleTests.test_red"},
+            approval="required",
+        )
+        plan = WorkflowPlan((test_step,))
+
+        with self.assertRaises(ApprovalRequiredError) as caught:
+            self.engine.run_workflow(plan)
+        controller, requested = self._approve(caught.exception)
+        approved = controller.approve(requested.request_id)
+        runtime = self.engine.last_workflow_runtime
+
+        self.assertEqual(approved.status, "approved")
+        self.assertEqual(runtime.status, "failed")
+        self.assertEqual(runtime.steps["focused"].status, "failed")
+        self.assertIsNone(runtime.steps["focused"].correction_runtime)
+        correction_factory.assert_not_called()
+
     def test_empty_workflow_completes(self):
         runtime = self.engine.run_workflow(WorkflowPlan(()), goal="nothing")
         self.assertEqual(runtime.status, "completed")

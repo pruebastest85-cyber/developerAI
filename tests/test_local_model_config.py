@@ -76,6 +76,7 @@ class LocalModelConfigTests(unittest.TestCase):
         for changes in [
             {"provider": "remote"},
             {"structured_format": "auto"},
+            {"structured_format": "json_object"},
             {"temperature": -0.1},
             {"temperature": 2.1},
         ]:
@@ -147,12 +148,22 @@ class LocalModelConfigTests(unittest.TestCase):
             "DEVELOPERAI_MODEL_API_KEY": "secret",
             "DEVELOPERAI_MODEL_CONNECT_TIMEOUT": "2.5",
             "DEVELOPERAI_MODEL_READ_TIMEOUT": "9",
+            "DEVELOPERAI_MODEL_STRUCTURED_OUTPUT_MODE": "prompt_json",
             "UNRELATED": "unchanged",
         }
         config = LocalModelConfig.from_env(source)
         self.assertEqual(config.model, "local")
         self.assertEqual(config.connect_timeout_seconds, 2.5)
+        self.assertEqual(config.structured_output_mode, "prompt_json")
         self.assertEqual(source["UNRELATED"], "unchanged")
+
+    def test_structured_output_mode_defaults_to_json_schema(self):
+        config = LocalModelConfig.from_env({
+            "DEVELOPERAI_MODEL_NAME": "qwen",
+        })
+        self.assertEqual(config.structured_format, "json_schema")
+        self.assertEqual(config.structured_output_mode, "json_schema")
+        self.assertEqual(config.to_dict()["structured_format"], "json_schema")
 
     def test_invalid_environment_number_has_typed_error(self):
         with self.assertRaises(ModelConfigurationError) as caught:
@@ -161,6 +172,17 @@ class LocalModelConfigTests(unittest.TestCase):
                 "DEVELOPERAI_MODEL_CONNECT_TIMEOUT": "not-a-number",
             })
         self.assertEqual(caught.exception.code, "invalid_environment")
+
+    def test_unknown_environment_output_mode_is_rejected(self):
+        with self.assertRaises(ModelConfigurationError) as caught:
+            LocalModelConfig.from_env({
+                "DEVELOPERAI_MODEL_NAME": "qwen",
+                "DEVELOPERAI_MODEL_STRUCTURED_OUTPUT_MODE": "unknown",
+            })
+        self.assertEqual(
+            caught.exception.code,
+            "unsupported_structured_format",
+        )
 
 
 if __name__ == "__main__":

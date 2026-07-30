@@ -351,6 +351,7 @@ class CorrectionEngine:
         test_runner=None,
         approval_service=None,
         runtime_id_factory=None,
+        execution_provenance=None,
     ):
         if limits is not None and not isinstance(limits, WorkflowLimits):
             raise CorrectionEngineError("limits debe ser WorkflowLimits")
@@ -368,6 +369,7 @@ class CorrectionEngine:
         self.runtime_id_factory = runtime_id_factory or (
             lambda: str(uuid.uuid4())
         )
+        self.execution_provenance = execution_provenance
         self.runtime: CorrectionRuntimeState | None = None
         self._pending_approval_request: CorrectionApprovalRequest | None = None
         self._validate_dependencies()
@@ -392,6 +394,85 @@ class CorrectionEngine:
         self.runtime = runtime
         runtime.accept_proposal(proposal)
         self._validate_and_request(runtime, proposal)
+        return runtime
+
+    def start_from_test_failure(
+        self,
+        goal: str,
+        test_spec: TestSpec,
+        result: ToolResult,
+        *,
+        initial_plan_identity,
+        execution_event=None,
+        workflow_plan=None,
+        workflow_runtime=None,
+        workflow_step=None,
+        execution_authority=None,
+    ) -> CorrectionRuntimeState:
+        """Enter correction from one trusted, already executed red test."""
+        if self.runtime is not None and self.runtime.status not in TERMINAL_CORRECTION_STATUSES:
+            raise CorrectionEngineError("Ya existe un runtime activo")
+        if (
+            not isinstance(test_spec, TestSpec)
+            or test_spec.scope != "focused"
+            or not isinstance(result, ToolResult)
+            or result.tool_name != "test_runner"
+            or result.status != "failed"
+            or failure_category(result) != "test_failure"
+        ):
+            raise CorrectionTestResultError(
+                "La entrada correctiva exige una prueba focal roja real"
+            )
+        data = result.data
+        if (
+            not isinstance(data, dict)
+            or type(data.get("tests_run")) is not int
+            or data["tests_run"] <= 0
+            or type(data.get("failures")) is not int
+            or type(data.get("errors")) is not int
+            or data["failures"] + data["errors"] <= 0
+            or data.get("returncode") == 0
+        ):
+            raise CorrectionTestResultError(
+                "El resultado rojo no contiene evidencia de pruebas"
+            )
+        if self.execution_provenance is None:
+            raise CorrectionTestResultError(
+                "La entrada correctiva exige procedencia de ejecución"
+            )
+        try:
+            authority = self.execution_provenance.claim_consumed_authority(
+                execution_authority,
+                event=execution_event,
+                plan=workflow_plan,
+                runtime=workflow_runtime,
+                step=workflow_step,
+                result=result,
+            )
+        except (TypeError, ValueError):
+            raise CorrectionTestResultError(
+                "La evidencia de prueba no es auténtica"
+            ) from None
+        runtime = CorrectionRuntimeState(
+            goal,
+            limits=self.limits,
+            status="testing_focused",
+            initial_plan_identity=initial_plan_identity,
+            runtime_id=self.runtime_id_factory(),
+        )
+        runtime.modified_files = authority["modified_files"]
+        runtime.total_write_bytes = authority["total_write_bytes"]
+        runtime.total_changed_lines = authority["total_changed_lines"]
+        runtime.correction_iterations = authority["correction_iterations"]
+        self.runtime = runtime
+        fingerprint = failure_fingerprint(test_spec, result)
+        runtime.record_test_run(
+            test_spec,
+            result,
+            fingerprint,
+            failure_category(result),
+        )
+        runtime.register_failure(fingerprint)
         return runtime
 
     def submit_correction(

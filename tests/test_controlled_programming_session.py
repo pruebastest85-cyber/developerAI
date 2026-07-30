@@ -126,6 +126,7 @@ class ControlledProgrammingSessionTests(unittest.TestCase):
         self.assertIn("planning_failed", rendered)
         self.assertNotIn("SECRET", rendered)
         self.assertNotIn("private", rendered)
+        self.assertEqual(self.session.get_session_state(), "failed")
         self.agent.execution_engine.run.assert_not_called()
         self.agent.tool_router.dispatch.assert_not_called()
 

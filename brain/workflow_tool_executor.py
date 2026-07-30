@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from brain.workflow_limits import WorkflowLimits
+from brain.change_proposal import TestSpec
 from brain.workflow_plan import StepSpec, WorkflowPlan
 from brain.workflow_runtime import WorkflowRuntimeState
 from tools.tool_result import ToolResult
@@ -60,6 +61,23 @@ def _git_status_payload(args: Mapping[str, Any]) -> dict[str, Any]:
     return {"action": "status"}
 
 
+def _test_runner_payload(args: Mapping[str, Any]) -> dict[str, Any]:
+    supplied = dict(args)
+    test_id = supplied.pop("test_id", None)
+    if test_id is not None:
+        if supplied:
+            raise WorkflowExecutorConfigurationError(
+                "test_id no puede combinarse con otros argumentos"
+            )
+        try:
+            return {"test_spec": TestSpec("focused", (test_id,))}
+        except (TypeError, ValueError):
+            raise WorkflowExecutorConfigurationError(
+                "test_id no es un identificador unittest permitido"
+            ) from None
+    return supplied
+
+
 ACTION_CONTRACTS = {
     ("code_reader", "read_file"): _ActionContract(
         "code_reader",
@@ -90,8 +108,8 @@ ACTION_CONTRACTS = {
     ("test_runner", "run_tests"): _ActionContract(
         "test_runner",
         frozenset(),
-        frozenset({"command"}),
-        _copy_payload,
+        frozenset({"command", "test_id"}),
+        _test_runner_payload,
     ),
     ("git_tools", "status"): _ActionContract(
         "git_tools",
@@ -114,9 +132,21 @@ def is_controlled_workflow_step(step: StepSpec) -> bool:
 class WorkflowToolExecutor:
     """Validate and execute only explicitly declared current tool contracts."""
 
-    def __init__(self, agent, limits: WorkflowLimits | None = None):
+    def __init__(
+        self,
+        agent,
+        limits: WorkflowLimits | None = None,
+        *,
+        execution_provenance=None,
+        execution_binding=None,
+        plan: WorkflowPlan | None = None,
+    ):
         self.agent = agent
         self.limits = limits or WorkflowLimits()
+        self.execution_provenance = execution_provenance
+        self.execution_binding = execution_binding
+        self.plan = plan
+        self.last_test_event = None
 
     @property
     def allowed_tools(self) -> frozenset[str]:
@@ -146,6 +176,8 @@ class WorkflowToolExecutor:
                     f"Herramienta no disponible: {step.tool}"
                 )
             contract.validate_argument_names(set(step.args) | set(step.bindings))
+            if not step.bindings:
+                contract.build_payload(step.args)
 
     def build_payload(
         self,
@@ -177,7 +209,7 @@ class WorkflowToolExecutor:
             step.tool,
             execute_structured_tool,
             action_name=step.action,
-            important_args=payload,
+            important_args=_copy_payload(resolved_args),
             approval_token=approval_token,
             structured=True,
             require_approval=step.approval == "required",
@@ -198,6 +230,15 @@ class WorkflowToolExecutor:
         result = approved_action()
         self._validate_result(step, result)
         self._record_usage(runtime, usage)
+        self.last_test_event = None
+        if self.execution_provenance is not None and self.plan is not None:
+            self.last_test_event = self.execution_provenance.issue_test_event(
+                self.execution_binding,
+                self.plan,
+                runtime,
+                step,
+                result,
+            )
         return result
 
     @staticmethod

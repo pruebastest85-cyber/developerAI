@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from brain.approval_controller import ApprovalRequiredError
-from brain.change_proposal import ChangeProposal
+from brain.change_proposal import ChangeProposal, TestSpec
 from brain.change_proposal_adapter import ChangeProposalAdaptationError
 from brain.correction_engine import CorrectionEngine
 from brain.correction_runtime import (
@@ -16,6 +16,10 @@ from brain.correction_runtime import (
 )
 from brain.correction_workflow import CorrectionWorkflowController
 from brain.execution_state import ExecutionState
+from brain.execution_provenance import (
+    ExecutionProvenanceError,
+    ExecutionProvenanceRegistry,
+)
 from brain.reflection_engine import ReflectionEngine
 from brain.workflow_limits import WorkflowLimits
 from brain.workflow_plan import ArgumentResolver, ResultResolutionError, WorkflowPlan
@@ -69,6 +73,14 @@ class ExecutionEngine:
         self.last_state: Optional[ExecutionState] = None
         self.last_workflow_runtime: Optional[WorkflowRuntimeState] = None
         self.workflow_limits = WorkflowLimits()
+        self._execution_provenance = ExecutionProvenanceRegistry(
+            self.workflow_limits,
+            session_owner=lambda: getattr(
+                self.agent,
+                "_programming_session",
+                None,
+            ),
+        )
         self.correction_controller_factory = (
             correction_controller_factory
             or self._default_correction_controller
@@ -79,8 +91,19 @@ class ExecutionEngine:
             engine=CorrectionEngine(
                 workspace=self.agent.base_dir,
                 limits=self.workflow_limits,
+                execution_provenance=self._execution_provenance,
             )
         )
+
+    def _authorize_controlled_execution(self, session, plan: WorkflowPlan):
+        if session is not self.agent.get_programming_session():
+            raise ExecutionProvenanceError(
+                "La capacidad solo puede pertenecer a la sesión del agente"
+            )
+        return self._execution_provenance.authorize(session, plan)
+
+    def _discard_controlled_execution(self, capability) -> None:
+        self._execution_provenance.discard(capability)
 
     def build_plan(self, message: str) -> List[Dict[str, str]]:
         text = message.lower().strip()
@@ -490,9 +513,6 @@ class ExecutionEngine:
             raise TypeError("safe_logging debe ser bool")
         plan.validate()
 
-        executor = WorkflowToolExecutor(self.agent, limits=self.workflow_limits)
-        executor.validate_plan(plan)
-
         if runtime is None:
             runtime = WorkflowRuntimeState.create(plan, goal=goal)
         else:
@@ -504,6 +524,16 @@ class ExecutionEngine:
                     "Un workflow pendiente debe reanudarse mediante su aprobación"
                 )
             runtime.prepare_resume(plan)
+
+        binding = self._execution_provenance.bind_pending(plan, runtime)
+        executor = WorkflowToolExecutor(
+            self.agent,
+            limits=self.workflow_limits,
+            execution_provenance=self._execution_provenance,
+            execution_binding=binding,
+            plan=plan,
+        )
+        executor.validate_plan(plan)
 
         self.last_workflow_runtime = runtime
         resolver = ArgumentResolver()
@@ -654,6 +684,30 @@ class ExecutionEngine:
                 result = self._correction_tool_result(step.tool, result)
                 step_runtime.clear_correction_controller()
 
+            if (
+                executor.last_test_event is not None
+                and self._is_trusted_red_test(step, result)
+            ):
+                correction_runtime = self._start_test_failure_correction(
+                    plan,
+                    runtime,
+                    step,
+                    step_runtime,
+                    result,
+                    executor.last_test_event,
+                )
+                runtime.mark_awaiting_correction(
+                    step_id,
+                    correction_runtime.terminal_reason,
+                )
+                self._log_workflow_step(
+                    step,
+                    resolved_args,
+                    result,
+                    safe=safe_logging,
+                )
+                return runtime
+
             runtime.record_result(step_id, result)
             self._log_workflow_step(
                 step,
@@ -685,7 +739,10 @@ class ExecutionEngine:
                 "El workflow no espera una corrección"
             )
         step = next(item for item in plan.steps if item.id == step_id)
-        if not is_controlled_workflow_step(step):
+        if not (
+            is_controlled_workflow_step(step)
+            or self._is_trusted_test_correction_step(plan, runtime, step_id)
+        ):
             raise WorkflowRuntimeTransitionError(
                 f"El paso {step_id} no es un flujo de corrección"
             )
@@ -859,6 +916,104 @@ class ExecutionEngine:
         except BaseException:
             step_runtime.clear_correction_controller()
             raise
+
+    @staticmethod
+    def _is_trusted_red_test(step, result) -> bool:
+        if (
+            step.tool != "test_runner"
+            or step.action != "run_tests"
+            or not isinstance(result, ToolResult)
+            or result.tool_name != "test_runner"
+            or result.status != "failed"
+            or type(step.args.get("test_id")) is not str
+        ):
+            return False
+        data = result.data
+        return (
+            isinstance(data, dict)
+            and type(data.get("tests_run")) is int
+            and data["tests_run"] > 0
+            and type(data.get("failures")) is int
+            and type(data.get("errors")) is int
+            and data["failures"] + data["errors"] > 0
+            and data.get("returncode") != 0
+            and data.get("timed_out") is not True
+        )
+
+    def _start_test_failure_correction(
+        self,
+        plan,
+        runtime,
+        step,
+        step_runtime,
+        result,
+        test_event,
+    ) -> CorrectionRuntimeState:
+        if (
+            runtime.status != "running"
+            or runtime.current_step_id != step.id
+            or step_runtime.status != "running"
+            or step_runtime.correction_controller is not None
+        ):
+            raise WorkflowRuntimeTransitionError(
+                "El fallo de pruebas no pertenece al runtime activo"
+            )
+        test_spec = TestSpec("focused", (step.args["test_id"],))
+        execution_authority = self._execution_provenance.consume_red_test_event(
+            test_event,
+            plan=plan,
+            runtime=runtime,
+            step=step,
+            result=result,
+        )
+        controller = self.correction_controller_factory()
+        if not isinstance(controller, CorrectionWorkflowController):
+            raise TypeError(
+                "correction_controller_factory debe devolver "
+                "CorrectionWorkflowController"
+            )
+        controller.engine.execution_provenance = self._execution_provenance
+        correction_runtime = controller.start_from_test_failure(
+            step.goal or runtime.goal or "correction",
+            test_spec,
+            result,
+            initial_plan_identity=plan.identity(),
+            execution_event=test_event,
+            workflow_plan=plan,
+            workflow_runtime=runtime,
+            workflow_step=step,
+            execution_authority=execution_authority,
+        )
+        if (
+            correction_runtime.status != "awaiting_correction"
+            or correction_runtime.initial_plan_identity != plan.identity()
+        ):
+            raise WorkflowRuntimeTransitionError(
+                "El adaptador no produjo una correcciÃ³n vinculada"
+            )
+        step_runtime.correction_controller = controller
+        step_runtime.correction_runtime = correction_runtime
+        return correction_runtime
+
+    @staticmethod
+    def _is_trusted_test_correction_step(plan, runtime, step_id: str) -> bool:
+        step = next((item for item in plan.steps if item.id == step_id), None)
+        step_runtime = runtime.steps.get(step_id)
+        correction_runtime = (
+            step_runtime.correction_runtime if step_runtime is not None else None
+        )
+        return bool(
+            step is not None
+            and step.tool == "test_runner"
+            and step.action == "run_tests"
+            and type(step.args.get("test_id")) is str
+            and isinstance(
+                getattr(step_runtime, "correction_controller", None),
+                CorrectionWorkflowController,
+            )
+            and isinstance(correction_runtime, CorrectionRuntimeState)
+            and correction_runtime.initial_plan_identity == plan.identity()
+        )
 
     @staticmethod
     def _correction_tool_result(
@@ -1085,6 +1240,29 @@ class ExecutionEngine:
                 except BaseException:
                     pass
                 raise
+            if (
+                executor.last_test_event is not None
+                and self._is_trusted_red_test(step, result)
+            ):
+                correction_runtime = self._start_test_failure_correction(
+                    plan,
+                    runtime,
+                    step,
+                    runtime.steps[step_id],
+                    result,
+                    executor.last_test_event,
+                )
+                runtime.mark_awaiting_correction(
+                    step_id,
+                    correction_runtime.terminal_reason,
+                )
+                self._log_workflow_step(
+                    step,
+                    resolved_args,
+                    result,
+                    safe=safe_logging,
+                )
+                return runtime
             runtime.record_result(step_id, result)
             self._log_workflow_step(
                 step,
