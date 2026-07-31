@@ -1133,5 +1133,101 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
                 shutil.rmtree(root, ignore_errors=True)
 
 
+    @unittest.skipUnless(os.name == "nt", "Windows root handle contract")
+    def test_atomic_replace_stays_bound_to_the_original_root(self):
+        """Criterios 5 y 6: el reemplazo sigue al handle, no al nombre.
+
+        La sustituta tiene un archivo con el mismo nombre y contenido
+        distinto. Reemplazar debe actualizar el de la raiz original y
+        dejar el de la impostora exactamente como estaba.
+        """
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        moved = root.with_name(root.name + "-moved")
+        guard = None
+        try:
+            guard = _StableRoot(root, _path_identity(root))
+            _atomic_json(root / "owner-status.json", {"v": "original"}, guard)
+
+            os.rename(root, moved)
+            root.mkdir()
+            _secure_private_path(root, directory=True)
+            senuelo = root / "owner-status.json"
+            senuelo.write_text('{"v":"senuelo"}', encoding="utf-8")
+
+            # Reemplazo atomico sobre un nombre que existe en las dos.
+            _atomic_json(root / "owner-status.json", {"v": "nuevo"}, guard)
+
+            self.assertIn(
+                "nuevo",
+                (moved / "owner-status.json").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                senuelo.read_text(encoding="utf-8"), '{"v":"senuelo"}'
+            )
+
+            # Y la lectura tambien viene de la original.
+            leido = _read_json(
+                root / "owner-status.json", frozenset({"v"}), guard
+            )
+            self.assertEqual(leido["v"], "nuevo")
+        finally:
+            if guard is not None:
+                guard.close()
+            import shutil
+            shutil.rmtree(moved, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_two_simultaneous_trials_stay_isolated(self):
+        """Criterio 12: dos ensayos a la vez no se ven ni se estorban."""
+        import shutil
+
+        primero = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        segundo = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(primero, directory=True)
+        _secure_private_path(segundo, directory=True)
+        guard_a = guard_b = None
+        try:
+            guard_a = _StableRoot(primero, _path_identity(primero))
+            guard_b = _StableRoot(segundo, _path_identity(segundo))
+            self.assertNotEqual(guard_a.identity, guard_b.identity)
+
+            _atomic_json(primero / "owner-status.json", {"v": "a"}, guard_a)
+            _atomic_json(segundo / "owner-status.json", {"v": "b"}, guard_b)
+            _atomic_json(segundo / "owner-command.json", {"v": "b2"}, guard_b)
+
+            self.assertEqual(
+                _read_json(
+                    primero / "owner-status.json", frozenset({"v"}), guard_a
+                )["v"],
+                "a",
+            )
+            self.assertEqual(
+                _read_json(
+                    segundo / "owner-status.json", frozenset({"v"}), guard_b
+                )["v"],
+                "b",
+            )
+            self.assertFalse(guard_a.file_exists("owner-command.json"))
+            self.assertTrue(guard_b.file_exists("owner-command.json"))
+
+            # Limpiar uno no toca al otro.
+            _remove_stable_contents(guard_a)
+            self.assertEqual(list(primero.iterdir()), [])
+            self.assertEqual(len(list(segundo.iterdir())), 2)
+        finally:
+            for guard in (guard_a, guard_b):
+                if guard is not None:
+                    guard.close()
+            shutil.rmtree(primero, ignore_errors=True)
+            shutil.rmtree(segundo, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

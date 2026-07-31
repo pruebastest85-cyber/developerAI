@@ -862,6 +862,95 @@ def _is_alive(pid: int) -> bool:
         return False
 
 
+class _JobBasicLimit(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_ulong),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_ulong),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_ulong),
+        ("SchedulingClass", ctypes.c_ulong),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JobExtendedLimit(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobBasicLimit),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _bind_owner_to_job():
+    """Make the owner's descendants die with it (hallazgo P).
+
+    TerminateProcess ends one process, not its tree: a git.exe spawned by
+    the isolated environment can outlive the owner while still holding
+    entries open, which is what forced the retry in _remove_stable_contents.
+
+    Assigning the owner itself to a job with KILL_ON_JOB_CLOSE fixes the
+    cause: children inherit job membership, so closing the last job handle
+    -- which happens when the owner dies -- terminates every descendant.
+    The initiator is NOT in the job, so a detached owner still outlives
+    the process that launched it. The premise of phase 8.5 is untouched.
+
+    This is cleanup hardening, not a security boundary. If the platform
+    refuses the assignment the owner keeps running: the retry mitigation
+    is still in place, and killing the session would be worse.
+    """
+    if os.name != "nt":
+        return None
+    kernel = ctypes.windll.kernel32
+    kernel.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong,
+    ]
+    kernel.SetInformationJobObject.restype = ctypes.c_int
+    kernel.AssignProcessToJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    kernel.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    information = _JobExtendedLimit()
+    information.BasicLimitInformation.LimitFlags = (
+        0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    )
+    if not kernel.SetInformationJobObject(
+        ctypes.c_void_p(job),
+        9,  # JobObjectExtendedLimitInformation
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ) or not kernel.AssignProcessToJobObject(
+        ctypes.c_void_p(job), kernel.GetCurrentProcess()
+    ):
+        _close_windows_handle(job)
+        return None
+    # El handle se conserva abierto a proposito: al morir el propietario,
+    # Windows lo cierra y el job termina a todos sus descendientes.
+    return job
+
+
 @dataclass(frozen=True)
 class _ProcessIdentity:
     pid: int
@@ -1703,6 +1792,8 @@ class _Owner:
 
     def run(self):
         try:
+            # Hallazgo P: los hijos del propietario deben morir con el.
+            self.job = _bind_owner_to_job()
             raw_request = sys.stdin.buffer.read(256 * 1024 + 1)
             if len(raw_request) > 256 * 1024:
                 raise TrialProcessError("owner_start_failed")

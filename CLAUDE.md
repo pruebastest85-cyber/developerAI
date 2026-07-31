@@ -97,6 +97,20 @@ La evidencia **nunca** debe contener secretos, capacidad reutilizable, callbacks
 - **Terminación segura en Windows:** prohibido el patrón «consultar PID → cerrar → `os.kill(pid)`». Se abre el proceso, se verifica identidad (PID, tiempo de creación, ejecutable) **con el mismo handle**, el handle permanece abierto, se termina con ese handle y se cierra en éxito y en error. **En Windows nunca `os.kill`** — en Python, `os.kill` en Windows llama a `TerminateProcess` incluso con señal 0.
 - **Seguridad de archivos:** validación de archivo regular, ausencia de symlinks, ausencia de junctions y reparse points, propietario esperado, SID, DACL, entradas autorizadas, ausencia de grupos compartidos no permitidos, y permisos equivalentes en POSIX.
 
+### Modelo de amenaza — decisiones documentadas (hallazgos E y H)
+
+**Hallazgo E — dónde está la frontera de seguridad real.** La capacidad se entrega por dos canales: una tubería anónima al arrancar **y** el archivo `owner-capability.bin` en la raíz del ensayo, que nunca se borra. `TrialProcessClient` reconstruye la autoridad **leyendo ese archivo**.
+
+Esto no es un defecto: es necesario para el requisito central de la Fase 8.5, porque el iniciador muere y un cliente independiente debe poder continuar la sesión, así que la capacidad tiene que persistir. Pero cambia dónde está la frontera:
+
+> La autoridad de comandos está protegida por la **ACL del archivo de capacidad**, no por la tubería anónima. Las funciones `_verify_windows_security_*` no son defensa en profundidad: son el único mecanismo que sostiene la autoridad. Cualquiera capaz de leer `owner-capability.bin` es un cliente autorizado.
+
+**Consecuencia operativa:** debilitar o saltarse la verificación de DACL equivale a entregar la autoridad. No se relaja nunca, ni para hacer pasar una prueba.
+
+**Hallazgo H — riesgo residual aceptado en POSIX.** En POSIX, varias operaciones actúan por nombre relativo a un descriptor de directorio ya verificado (`os.open`, `os.unlink`, `os.rename`/`os.replace` con `dir_fd`, y el `os.rmdir` final sobre el padre). El `dir_fd` ancla la operación al *objeto* directorio, así que el directorio no puede sustituirse; solo la entrada dentro de él. POSIX no ofrece un `unlinkat` por descriptor de archivo, de modo que no hay alternativa. Con la raíz en modo `0700` y propiedad del usuario, el riesgo queda acotado.
+
+**Decisión: se acepta como riesgo residual y no se persigue.** El hallazgo 11.1 está redactado para Windows, y en Windows todas esas rutas usan handles. La única que merece vigilancia es la apertura del **padre** por pathname en la limpieza POSIX, porque suele ser `/tmp`, escribible por todos aunque con bit sticky.
+
 ## 6. Estado verificado en Windows (30 jul 2026)
 
 Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
@@ -105,7 +119,7 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 |---|---|
 | Rama / `HEAD` / `origin/master` | `master` / `cf6163b…` / igual, sincronizado |
 | Último commit | `cf6163b` — 3 archivos, 161 inserciones, 59 eliminaciones. Árbol limpio |
-| Suite completa | **695 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~45 s** |
+| Suite completa | **697 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~48 s** |
 | Reproducibilidad | pasadas consecutivas en verde, banda estrecha de 42-43 s |
 | Fase 8.5 (proceso + harness) | **49 correctas, 0 fallos**, ~27 s |
 | `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
@@ -203,7 +217,9 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 | J (corregido) | ~~trial_windows_fs.close() inconsistente~~ | ~~Baja~~ | ~~resuelto 30 jul~~ |
 | ~~Q~~ | ~~Intermitencia residual: el propietario moría aleatoriamente~~ **CORREGIDO**, ver abajo | — | resuelto 30 jul |
 | ~~R~~ | ~~La suite se volvió un 50% más lenta y con mucha varianza~~ **RESUELTO como efecto colateral de Q.** La lentitud era *consecuencia* de la carrera, no su causa: al corregirla, el subconjunto pasó de 58-164 s con varianza enorme a 27-30 s en banda estrecha | — | resuelto 30 jul |
-| P | **Riesgo de diseño abierto:** los descendientes del propietario le sobreviven en Windows | Media (diseño) | `TrialProcessLauncher.start` |
+| ~~P~~ | ~~Los descendientes del propietario le sobreviven en Windows~~ **CORREGIDO (31 jul)**: `_bind_owner_to_job()` asigna al propietario a un Job Object con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` al arrancar `_Owner.run()`. Los hijos heredan la pertenencia y mueren con él. El iniciador **no** está en el job, así que la premisa de la Fase 8.5 se conserva — verificado explícitamente con `test_owner_survives_a_completely_separate_initiator`. El handle del job se deja abierto a propósito: es el mecanismo. Si el sistema rechaza la asignación, el propietario sigue vivo: es endurecimiento de limpieza, no una frontera de seguridad | — | resuelto 31 jul |
+| T | **Las pruebas unitarias nuevas dejan carpetas en `%TEMP%`.** Usan `shutil.rmtree(..., ignore_errors=True)` en el `finally`, que se traga cualquier fallo de borrado en silencio. Sin diagnosticar: falta medir cuántas quedan por corrida y por qué falla el borrado | Baja (higiene) | `tests/test_controlled_trial_process.py` |
+| ~~P-viejo~~ | ~~Riesgo de diseño abierto: los descendientes del propietario le sobreviven en Windows~~ | Media (diseño) | `TrialProcessLauncher.start` |
 
 **A y B explican mecánicamente el incidente de limpieza transitoria:** mientras un handle esté abierto, Windows no permite eliminar el directorio que lo contiene. Solo se alcanzan por rutas adversariales que la suite actual no ejercita, lo que explica que el fallo fuera intermitente.
 
@@ -213,7 +229,12 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 
 ### Cobertura de los 18 criterios adversariales
 
-**15 cumplidos, 3 parciales (5, 6, 12), ninguno sin prueba.**
+**Los 18 cumplidos. Ninguno parcial, ninguno sin prueba.**
+
+Cerrados el 31 jul los tres que quedaban a medias:
+
+- **Criterios 5 y 6** — `test_atomic_replace_stays_bound_to_the_original_root`. La carpeta sustituta contiene un señuelo con el **mismo nombre** y contenido distinto. El reemplazo actualiza el de la raíz original y deja el señuelo intacto; la lectura posterior también viene de la original. No basta con que la escritura no vaya a la impostora: tiene que ir a la raíz correcta teniendo un homónimo delante.
+- **Criterio 12** — `test_two_simultaneous_trials_stay_isolated`. Dos ensayos vivos a la vez con identidades distintas: cada handle solo ve sus archivos y limpiar uno deja el otro intacto.
 
 Añadidos el 31 jul:
 
