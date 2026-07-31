@@ -26,6 +26,7 @@ from controlled_trial_process import (
     _path_identity,
     _read_json,
     _read_capability,
+    _remove_stable_contents,
     _secure_private_path,
     _validate_command,
     _valid_status,
@@ -830,6 +831,138 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             guard.close()
             import shutil
             shutil.rmtree(root)
+
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle accounting")
+    def test_handles_are_closed_on_success_and_on_error(self):
+        """Criterio 14: todo handle abierto se cierra, pase lo que pase.
+
+        Un handle que se queda abierto impide a Windows eliminar el
+        directorio que lo contiene, que es como se manifestaban las
+        fugas de los hallazgos A y B: el borrado del temporal fallaba y
+        el cierre se saltaba.
+        """
+        import trial_windows_fs as winfs
+
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        opened, closed = [], []
+        real_open, real_close = winfs.open_relative, winfs.close
+
+        def counting_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            opened.append(handle)
+            return handle
+
+        def counting_close(handle):
+            closed.append(handle)
+            return real_close(handle)
+
+        guard = None
+        try:
+            with mock.patch.object(winfs, "open_relative", counting_open), \
+                 mock.patch.object(winfs, "close", counting_close):
+                guard = _StableRoot(root, _path_identity(root))
+
+                _atomic_json(root / "owner-status.json", {"a": 1}, guard)
+                self.assertGreater(len(opened), 0)
+                self.assertEqual(
+                    len(opened), len(closed), "camino feliz desbalanceado"
+                )
+
+                destination = root / "owner-command.json"
+                destination.mkdir()
+                with self.assertRaises(TrialProcessError):
+                    _atomic_json(destination, {"b": 2}, guard)
+                self.assertEqual(
+                    len(opened), len(closed), "camino de error desbalanceado"
+                )
+                self.assertEqual(
+                    list(root.glob(".developerai-ipc-*.tmp")), []
+                )
+
+                _read_json(
+                    root / "owner-status.json", frozenset({"a"}), guard
+                )
+                self.assertEqual(len(opened), len(closed))
+
+                _remove_stable_contents(guard)
+                self.assertEqual(
+                    len(opened), len(closed), "limpieza desbalanceada"
+                )
+                self.assertEqual(list(root.iterdir()), [])
+        finally:
+            if guard is not None:
+                guard.close()
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows deletion semantics")
+    def test_partial_removal_can_be_retried_idempotently(self):
+        """Criterio 13: una limpieza a medias se reintenta sin dañar nada.
+
+        Si el primer intento borra unas entradas y falla en otra, el
+        segundo debe terminar el trabajo. Fallar cerrado no puede
+        significar dejar el ensayo en un estado del que no se sale.
+        """
+        import trial_windows_fs as winfs
+
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        guard = None
+        try:
+            guard = _StableRoot(root, _path_identity(root))
+            for name in ("uno.json", "dos.json", "tres.json"):
+                _atomic_json(root / name, {"n": name}, guard)
+            nested = root / "sub"
+            nested.mkdir()
+            (nested / "cuatro.txt").write_text("x", encoding="utf-8")
+            before_failure = sum(1 for _ in root.rglob("*"))
+            self.assertEqual(before_failure, 5)
+
+            real_delete = winfs.delete
+            state = {"calls": 0}
+
+            def flaky_delete(handle):
+                state["calls"] += 1
+                if state["calls"] == 2:
+                    raise winfs.NativeFileError("ntstatus:c0000043")
+                return real_delete(handle)
+
+            # _remove_stable_contents deja propagar el error nativo tal
+            # cual; quien lo traduce a TrialProcessError es su llamador,
+            # terminate_and_cleanup.
+            with mock.patch.object(winfs, "delete", flaky_delete):
+                with self.assertRaises(winfs.NativeFileError):
+                    _remove_stable_contents(guard, patience=0)
+
+            # Quedo a medias. No se comprueba QUE entrada sobrevive: el
+            # orden de enumeracion de NTFS no es parte del contrato. Lo
+            # que importa es la propiedad: hubo progreso y no termino.
+            after_failure = sum(1 for _ in root.rglob("*"))
+            self.assertLess(
+                after_failure, before_failure, "no hubo ningun progreso"
+            )
+            self.assertGreater(
+                after_failure, 0, "la limpieza fallida vacio la raiz"
+            )
+
+            # Reintento sin el fallo: termina el trabajo.
+            _remove_stable_contents(guard)
+            self.assertEqual(list(root.iterdir()), [])
+
+            # Y es idempotente: repetirlo sobre una raiz ya vacia no rompe.
+            _remove_stable_contents(guard)
+            self.assertEqual(list(root.iterdir()), [])
+        finally:
+            if guard is not None:
+                guard.close()
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

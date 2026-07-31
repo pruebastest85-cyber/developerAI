@@ -103,11 +103,11 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 
 | Dato | Valor verificado |
 |---|---|
-| Rama / `HEAD` / `origin/master` | `master` / `91b4e7a7…` / igual, sincronizado |
-| Último commit | `91b4e7a` — 33 archivos, 6924 inserciones, 91 eliminaciones. Árbol limpio |
-| Suite completa | **689 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~42 s** |
-| Reproducibilidad | **3 pasadas consecutivas en verde**, tiempos 42,0 / 42,6 / 43,3 s |
-| Fase 8.5 (proceso + harness) | **47 correctas, 0 fallos**, 5 pasadas seguidas en 27-30 s |
+| Rama / `HEAD` / `origin/master` | `master` / `cf6163b…` / igual, sincronizado |
+| Último commit | `cf6163b` — 3 archivos, 161 inserciones, 59 eliminaciones. Árbol limpio |
+| Suite completa | **691 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~42 s** |
+| Reproducibilidad | pasadas consecutivas en verde, banda estrecha de 42-43 s |
+| Fase 8.5 (proceso + harness) | **49 correctas, 0 fallos**, ~27 s |
 | `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
 
 La suite tardaba 100-156 s con mucha varianza antes de corregir el hallazgo Q. Ahora 42 s en banda estrecha: la lentitud era la carrera reintentando y agotando esperas.
@@ -115,6 +115,18 @@ La suite tardaba 100-156 s con mucha varianza antes de corregir el hallazgo Q. A
 **Modo de desarrollador de Windows ACTIVADO**. Por eso ya no hay omitidas: las 13 pruebas de symlinks que antes se saltaban por `WinError 1314` ahora se ejecutan de verdad. Cualquier «0 fallos» anterior a esto era un falso verde.
 
 ### Hallazgos corregidos en esta sesión
+
+#### Hallazgo S — CORREGIDO (31 jul 2026)
+
+**Lo encontró la prueba del criterio 13 en su primera ejecución útil.** Era un fallo silencioso, la peor clase.
+
+En Windows el estado de enumeración de un directorio **vive en el handle, no en la llamada**. `entries()` usaba siempre `FileIdBothDirectoryInfo` (clase 10), que *continúa* la enumeración. La primera llamada la agotaba; una segunda sobre el mismo handle recibía `ERROR_NO_MORE_FILES` y devolvía lista vacía.
+
+Consecuencia: `_remove_stable_contents` **no era reintentable** sobre el mismo `_StableRoot`, y el reintento **no fallaba** — informaba de éxito dejando todos los archivos en disco. Violación directa del criterio 13 y del punto 9 (orden de limpieza).
+
+**Corrección:** la primera consulta usa `FileIdBothDirectoryRestartInfo` (clase 11) y las siguientes la clase 10.
+
+**Patrón a vigilar en este módulo:** la variable `restart` estaba declarada y nunca usada, igual que `FILE_RENAME_POSIX_SEMANTICS` en el hallazgo Q. **Dos veces ya.** En `trial_windows_fs.py`, una constante o variable declarada y sin usar debe tratarse como una pieza a medio implementar, no como suciedad.
 
 #### Hallazgo Q — CORREGIDO (30 jul 2026)
 
@@ -201,11 +213,14 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 
 ### Cobertura de los 18 criterios adversariales
 
-**9 cumplidos, 3 parciales (5, 6, 12), 6 sin prueba: criterios 4, 7, 8, 13, 14, 15.**
+**11 cumplidos, 3 parciales (5, 6, 12), 4 sin prueba: criterios 4, 7, 8, 15.**
 
-El criterio 14 («los handles se cierran en éxito y error») **cumple hoy** gracias a las correcciones de los hallazgos A, B, C, G y J.
+Añadidos el 31 jul:
 
-Faltan pruebas de: comandos colocados en una carpeta sustituta no aceptados (4); temporal sustituido o convertido en reparse point rechazado (7); destino sustituido o convertido en reparse point rechazado (8); eliminación parcial reintentable de forma idempotente (13); varias iteraciones consecutivas de creación, fallo y limpieza dejan cero temporales (15).
+- **Criterio 14** — `test_handles_are_closed_on_success_and_on_error`. Cuenta cada `open_relative` y cada `close` durante el camino feliz, un `_atomic_json` que falla, una lectura y la limpieza completa, y comprueba que las cuentas cuadran tras cada paso.
+- **Criterio 13** — `test_partial_removal_can_be_retried_idempotently`. Fuerza un fallo a mitad del borrado, comprueba que hubo progreso y que no terminó, reintenta y verifica que completa, y repite una tercera vez para confirmar idempotencia. **Comprueba propiedades, no un estado intermedio concreto:** el orden de enumeración de NTFS no es parte de ningún contrato y asumirlo produjo tres falsos fallos seguidos.
+
+Faltan pruebas de: comandos colocados en una carpeta sustituta no aceptados (4); temporal sustituido o convertido en reparse point rechazado (7); destino sustituido o convertido en reparse point rechazado (8); varias iteraciones consecutivas de creación, fallo y limpieza dejan cero temporales (15).
 
 ## 7. Secuencia de trabajo recomendada
 

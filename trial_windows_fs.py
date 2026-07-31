@@ -47,6 +47,7 @@ FILE_DISPOSITION_POSIX_SEMANTICS = 0x2
 FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE = 0x10
 
 FILE_ID_BOTH_DIR_INFO = 10
+FILE_ID_BOTH_DIR_RESTART_INFO = 11
 ERROR_NO_MORE_FILES = 18
 
 
@@ -298,19 +299,28 @@ def delete(handle):
 
 
 def entries(directory_handle):
-    """Return direct entry names and attributes from the opened directory."""
+    """Return direct entry names and attributes from the opened directory.
+
+    The first query MUST use the restart class. Directory enumeration
+    state lives on the handle, not on the call: querying twice with the
+    continue class resumes where the previous enumeration ended, so a
+    second call on the same handle reports an empty directory. That made
+    cleanup silently non-retryable -- the retry claimed success while
+    leaving every remaining entry on disk.
+    """
     buffer = ctypes.create_string_buffer(64 * 1024)
     result = []
-    restart = True
+    information_class = FILE_ID_BOTH_DIR_RESTART_INFO
     while True:
         if not _kernel().GetFileInformationByHandleEx(
-            directory_handle, FILE_ID_BOTH_DIR_INFO,
+            directory_handle, information_class,
             buffer, len(buffer),
         ):
             error = ctypes.windll.kernel32.GetLastError()
             if error == ERROR_NO_MORE_FILES:
                 break
             _raise_last_error()
+        information_class = FILE_ID_BOTH_DIR_INFO
         offset = 0
         while True:
             base = ctypes.addressof(buffer) + offset
@@ -323,5 +333,4 @@ def entries(directory_handle):
             if next_offset == 0:
                 break
             offset += next_offset
-        restart = False
     return result
