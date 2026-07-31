@@ -218,7 +218,7 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 | ~~Q~~ | ~~Intermitencia residual: el propietario moría aleatoriamente~~ **CORREGIDO**, ver abajo | — | resuelto 30 jul |
 | ~~R~~ | ~~La suite se volvió un 50% más lenta y con mucha varianza~~ **RESUELTO como efecto colateral de Q.** La lentitud era *consecuencia* de la carrera, no su causa: al corregirla, el subconjunto pasó de 58-164 s con varianza enorme a 27-30 s en banda estrecha | — | resuelto 30 jul |
 | ~~P~~ | ~~Los descendientes del propietario le sobreviven en Windows~~ **CORREGIDO (31 jul)**: `_bind_owner_to_job()` asigna al propietario a un Job Object con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` al arrancar `_Owner.run()`. Los hijos heredan la pertenencia y mueren con él. El iniciador **no** está en el job, así que la premisa de la Fase 8.5 se conserva — verificado explícitamente con `test_owner_survives_a_completely_separate_initiator`. El handle del job se deja abierto a propósito: es el mecanismo. Si el sistema rechaza la asignación, el propietario sigue vivo: es endurecimiento de limpieza, no una frontera de seguridad | — | resuelto 31 jul |
-| T | **Las pruebas unitarias nuevas dejan carpetas en `%TEMP%`.** Usan `shutil.rmtree(..., ignore_errors=True)` en el `finally`, que se traga cualquier fallo de borrado en silencio. Sin diagnosticar: falta medir cuántas quedan por corrida y por qué falla el borrado | Baja (higiene) | `tests/test_controlled_trial_process.py` |
+| ~~T~~ | ~~Las pruebas dejan carpetas en `%TEMP%`~~ **FALSA ALARMA, medido el 31 jul**: 62 carpetas antes de la suite y 62 después, cero avisos. Las pruebas no filtran nada; lo acumulado es histórico de días anteriores, incluidas ~20 de la cuenta `CodexSandboxOffli…` que requieren `takeown` desde una consola elevada. Aun así se sustituyeron los 14 `shutil.rmtree(..., ignore_errors=True)` por el helper `_purgar`, que reintenta y **avisa con el motivo** si alguna vez falla un borrado, en lugar de callarlo | — | resuelto 31 jul |
 | ~~P-viejo~~ | ~~Riesgo de diseño abierto: los descendientes del propietario le sobreviven en Windows~~ | Media (diseño) | `TrialProcessLauncher.start` |
 
 **A y B explican mecánicamente el incidente de limpieza transitoria:** mientras un handle esté abierto, Windows no permite eliminar el directorio que lo contiene. Solo se alcanzan por rutas adversariales que la suite actual no ejercita, lo que explica que el fallo fuera intermitente.
@@ -251,6 +251,12 @@ Faltan pruebas de: comandos colocados en una carpeta sustituta no aceptados (4);
 ## 7. Secuencia de trabajo recomendada
 
 ~~1-3. Corregir A, B, C, D, F, G, I, J, K, L, N, O.~~ Hecho el 30 jul.
+
+**Todos los hallazgos están cerrados y los 18 criterios cubiertos. Lo único que queda antes del ensayo real es la reauditoría independiente del punto 8.**
+
+**Advertencia sobre la independencia:** quien haya escrito las correcciones no puede auditarlas. La reauditoría debe hacerla una sesión distinta, partiendo de este archivo y del código, sin saber qué se cambió ni por qué. Si la hace quien corrigió, no es una auditoría: es una relectura de sus propias suposiciones.
+
+### Referencia histórica (todo resuelto)
 
 1. Diagnosticar **Q**, la intermitencia residual. Es el bloqueante real. Técnica que funcionó hoy: un plugin de pytest en `%TEMP%` que parchea `subprocess.Popen` dentro de `controlled_trial_process` para redirigir el `stderr` del propietario (que va a `DEVNULL`) a un archivo. Sin eso, cuando el propietario falla no queda ni una línea. Cargarlo con `-p nombre_plugin` sin instalarlo, con `PYTHONPATH` apuntando al repo y a `%TEMP%`.
 4. Escribir las 6 pruebas ausentes (criterios 4, 7, 8, 13, 14, 15) y reforzar las 3 parciales (5, 6, 12). **Activar antes el Modo de desarrollador de Windows**, o las de reparse points se omitirán en silencio.

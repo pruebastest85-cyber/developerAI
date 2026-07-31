@@ -38,6 +38,34 @@ from controlled_trial_process import (
 )
 
 
+def _purgar(path):
+    """Borra un arbol de prueba sin tragarse los fallos en silencio.
+
+    Pasar ignore_errors a rmtree oculta cualquier problema de borrado,
+    que es como estas pruebas acumulaban carpetas en %TEMP%.
+    Windows suelta los handles con algo de retraso, asi que se reintenta
+    un poco antes de rendirse; si aun asi falla, se avisa con el motivo
+    en vez de callarlo.
+    """
+    import shutil
+    import warnings
+
+    ultimo = None
+    for _ in range(20):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            ultimo = error
+            time.sleep(0.05)
+    warnings.warn(
+        f"residuo de prueba sin borrar: {path} -> {ultimo!r}",
+        stacklevel=2,
+    )
+
+
 PLAN = {
     "schema_version": "1",
     "goal": "Validate lifecycle",
@@ -897,7 +925,7 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             if guard is not None:
                 guard.close()
             import shutil
-            shutil.rmtree(root, ignore_errors=True)
+            _purgar(root)
 
     @unittest.skipUnless(os.name == "nt", "Windows deletion semantics")
     def test_partial_removal_can_be_retried_idempotently(self):
@@ -962,7 +990,7 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             if guard is not None:
                 guard.close()
             import shutil
-            shutil.rmtree(root, ignore_errors=True)
+            _purgar(root)
 
 
     @unittest.skipUnless(os.name == "nt", "Windows root handle contract")
@@ -1014,8 +1042,8 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             if guard is not None:
                 guard.close()
             import shutil
-            shutil.rmtree(moved, ignore_errors=True)
-            shutil.rmtree(root, ignore_errors=True)
+            _purgar(moved)
+            _purgar(root)
 
 
     @unittest.skipUnless(os.name == "nt", "Windows reparse point contract")
@@ -1059,8 +1087,8 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             if guard is not None:
                 guard.close()
             import shutil
-            shutil.rmtree(root, ignore_errors=True)
-            shutil.rmtree(outside.parent, ignore_errors=True)
+            _purgar(root)
+            _purgar(outside.parent)
 
     @unittest.skipUnless(os.name == "nt", "Windows reparse point contract")
     def test_substituted_temporary_is_rejected_and_never_followed(self):
@@ -1098,8 +1126,8 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             if guard is not None:
                 guard.close()
             import shutil
-            shutil.rmtree(root, ignore_errors=True)
-            shutil.rmtree(outside.parent, ignore_errors=True)
+            _purgar(root)
+            _purgar(outside.parent)
 
     def test_repeated_create_fail_cleanup_leaves_zero_temporaries(self):
         """Criterio 15: iterar creacion, fallo y limpieza no acumula."""
@@ -1130,7 +1158,7 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             finally:
                 if guard is not None:
                     guard.close()
-                shutil.rmtree(root, ignore_errors=True)
+                _purgar(root)
 
 
     @unittest.skipUnless(os.name == "nt", "Windows root handle contract")
@@ -1177,8 +1205,8 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             if guard is not None:
                 guard.close()
             import shutil
-            shutil.rmtree(moved, ignore_errors=True)
-            shutil.rmtree(root, ignore_errors=True)
+            _purgar(moved)
+            _purgar(root)
 
     def test_two_simultaneous_trials_stay_isolated(self):
         """Criterio 12: dos ensayos a la vez no se ven ni se estorban."""
@@ -1225,8 +1253,8 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             for guard in (guard_a, guard_b):
                 if guard is not None:
                     guard.close()
-            shutil.rmtree(primero, ignore_errors=True)
-            shutil.rmtree(segundo, ignore_errors=True)
+            _purgar(primero)
+            _purgar(segundo)
 
 
 if __name__ == "__main__":
