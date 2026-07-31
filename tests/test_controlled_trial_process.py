@@ -965,5 +965,173 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+    @unittest.skipUnless(os.name == "nt", "Windows root handle contract")
+    def test_commands_in_a_substitute_directory_are_not_accepted(self):
+        """Criterio 4: un comando en la carpeta sustituta no cuenta.
+
+        Se renombra la raiz y se crea otra carpeta con el pathname
+        anterior. Todo lo que siga colgando del handle original debe
+        ignorar por completo lo que aparezca en la impostora, y las
+        escrituras deben aterrizar en la raiz de verdad.
+        """
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        moved = root.with_name(root.name + "-moved")
+        guard = None
+        try:
+            guard = _StableRoot(root, _path_identity(root))
+            os.rename(root, moved)
+            root.mkdir()
+            _secure_private_path(root, directory=True)
+
+            impostor = root / "owner-command.json"
+            payload = '{"version":1,"impostor":true}'
+            impostor.write_text(payload, encoding="utf-8")
+
+            # El handle sigue ligado a la raiz original, que no tiene
+            # ningun comando: la impostora es invisible para el.
+            self.assertFalse(guard.file_exists("owner-command.json"))
+
+            # Y una escritura aterriza en la original aunque el pathname
+            # que se pase apunte a la sustituta: manda el handle, no la
+            # ruta. _entry_name solo toma el nombre de la entrada.
+            _atomic_json(root / "owner-status.json", {"a": 1}, guard)
+            self.assertTrue((moved / "owner-status.json").is_file())
+            self.assertFalse((root / "owner-status.json").exists())
+
+            # Nada de la carpeta sustituta fue leido ni modificado.
+            self.assertEqual(
+                impostor.read_text(encoding="utf-8"), payload
+            )
+
+            # Y la limpieza tampoco toca la sustituta.
+            _remove_stable_contents(guard)
+            self.assertEqual(list(moved.iterdir()), [])
+            self.assertTrue(impostor.is_file())
+        finally:
+            if guard is not None:
+                guard.close()
+            import shutil
+            shutil.rmtree(moved, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
+
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse point contract")
+    def test_reparse_point_destination_is_rejected_and_never_followed(self):
+        """Criterio 8: un destino convertido en enlace no se sigue.
+
+        Requiere Modo de desarrollador de Windows. Si esta prueba falla
+        al crear el enlace, actívalo: sin él, las pruebas de reparse
+        points se omitían en silencio y daban un falso verde.
+        """
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        outside = Path(tempfile.mkdtemp()).resolve() / "fuera.txt"
+        outside.write_text("intacto", encoding="utf-8")
+        guard = None
+        try:
+            guard = _StableRoot(root, _path_identity(root))
+            link = root / "owner-status.json"
+            os.symlink(outside, link)
+
+            # Leer un enlace se rechaza: open_relative abre el enlace en
+            # si (FILE_OPEN_REPARSE_POINT) y _validate_open_file lo veta.
+            with self.assertRaises(TrialProcessError) as rejected:
+                _read_json(link, frozenset({"a"}), guard)
+            self.assertEqual(rejected.exception.code, "invalid_status")
+
+            # file_exists tampoco puede decir "no existe": deja
+            # propagar, y el bucle del propietario lo trata como comando
+            # rechazado sin destruir la sesion.
+            with self.assertRaises(TrialProcessError):
+                guard.file_exists("owner-status.json")
+
+            # Y pase lo que pase, nada fuera de la raiz se modifica.
+            _atomic_json(link, {"a": 1}, guard)
+            self.assertEqual(
+                outside.read_text(encoding="utf-8"), "intacto"
+            )
+        finally:
+            if guard is not None:
+                guard.close()
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(outside.parent, ignore_errors=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse point contract")
+    def test_substituted_temporary_is_rejected_and_never_followed(self):
+        """Criterio 7: un temporal ya ocupado o enlazado se rechaza.
+
+        El nombre del temporal es aleatorio, asi que para provocarlo hay
+        que fijarlo. La creacion es exclusiva (FILE_CREATE): si el
+        nombre ya existe, debe fallar sin escribir por el enlace.
+        """
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        outside = Path(tempfile.mkdtemp()).resolve() / "fuera.txt"
+        outside.write_text("intacto", encoding="utf-8")
+        guard = None
+        try:
+            guard = _StableRoot(root, _path_identity(root))
+            fijo = "a" * 32
+            trampa = root / f".developerai-ipc-{fijo}.tmp"
+            os.symlink(outside, trampa)
+
+            with mock.patch(
+                "controlled_trial_process.secrets.token_hex",
+                return_value=fijo,
+            ):
+                with self.assertRaises(TrialProcessError):
+                    _atomic_json(root / "owner-status.json", {"a": 1}, guard)
+
+            self.assertEqual(
+                outside.read_text(encoding="utf-8"), "intacto"
+            )
+            self.assertFalse((root / "owner-status.json").exists())
+        finally:
+            if guard is not None:
+                guard.close()
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(outside.parent, ignore_errors=True)
+
+    def test_repeated_create_fail_cleanup_leaves_zero_temporaries(self):
+        """Criterio 15: iterar creacion, fallo y limpieza no acumula."""
+        import shutil
+
+        for _ in range(5):
+            root = Path(tempfile.mkdtemp(
+                prefix="developerai-real-trial-"
+            )).resolve()
+            _secure_private_path(root, directory=True)
+            guard = None
+            try:
+                guard = _StableRoot(root, _path_identity(root))
+                _atomic_json(root / "owner-status.json", {"a": 1}, guard)
+
+                # Fallo deliberado: el destino es un directorio.
+                bloqueado = root / "owner-command.json"
+                bloqueado.mkdir()
+                with self.assertRaises(TrialProcessError):
+                    _atomic_json(bloqueado, {"b": 2}, guard)
+
+                self.assertEqual(
+                    list(root.glob(".developerai-ipc-*.tmp")), [],
+                    "quedo un temporal tras el fallo",
+                )
+                _remove_stable_contents(guard)
+                self.assertEqual(list(root.iterdir()), [])
+            finally:
+                if guard is not None:
+                    guard.close()
+                shutil.rmtree(root, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

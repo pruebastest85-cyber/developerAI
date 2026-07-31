@@ -105,7 +105,7 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 |---|---|
 | Rama / `HEAD` / `origin/master` | `master` / `cf6163b…` / igual, sincronizado |
 | Último commit | `cf6163b` — 3 archivos, 161 inserciones, 59 eliminaciones. Árbol limpio |
-| Suite completa | **691 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~42 s** |
+| Suite completa | **695 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~45 s** |
 | Reproducibilidad | pasadas consecutivas en verde, banda estrecha de 42-43 s |
 | Fase 8.5 (proceso + harness) | **49 correctas, 0 fallos**, ~27 s |
 | `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
@@ -213,9 +213,14 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 
 ### Cobertura de los 18 criterios adversariales
 
-**11 cumplidos, 3 parciales (5, 6, 12), 4 sin prueba: criterios 4, 7, 8, 15.**
+**15 cumplidos, 3 parciales (5, 6, 12), ninguno sin prueba.**
 
 Añadidos el 31 jul:
+
+- **Criterio 4** — `test_commands_in_a_substitute_directory_are_not_accepted`. Renombra la raíz, crea otra carpeta con el pathname anterior y comprueba que el comando de la impostora es invisible, que una escritura aterriza en la raíz original **aunque el pathname apunte a la sustituta**, y que la limpieza no la toca. Es la prueba que caza cualquier reintroducción de operaciones por pathname.
+- **Criterio 8** — `test_reparse_point_destination_is_rejected_and_never_followed`. Leer un destino convertido en enlace se rechaza con `invalid_status`; `file_exists` deja propagar en vez de mentir; y nada fuera de la raíz se modifica.
+- **Criterio 7** — `test_substituted_temporary_is_rejected_and_never_followed`. Fija el nombre del temporal para poder ocuparlo con un enlace y verifica que la creación exclusiva falla sin escribir a través de él.
+- **Criterio 15** — `test_repeated_create_fail_cleanup_leaves_zero_temporaries`. Cinco iteraciones de creación, fallo y limpieza sin acumular temporales.
 
 - **Criterio 14** — `test_handles_are_closed_on_success_and_on_error`. Cuenta cada `open_relative` y cada `close` durante el camino feliz, un `_atomic_json` que falla, una lectura y la limpieza completa, y comprueba que las cuentas cuadran tras cada paso.
 - **Criterio 13** — `test_partial_removal_can_be_retried_idempotently`. Fuerza un fallo a mitad del borrado, comprueba que hubo progreso y que no terminó, reintenta y verifica que completa, y repite una tercera vez para confirmar idempotencia. **Comprueba propiedades, no un estado intermedio concreto:** el orden de enumeración de NTFS no es parte de ningún contrato y asumirlo produjo tres falsos fallos seguidos.
