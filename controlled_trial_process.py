@@ -598,6 +598,41 @@ def _validate_open_file(handle, *, require_protected=True):
 
 
 def _atomic_json(
+    path: Path, value: dict, root: _StableRoot, *, replace=True,
+    patience=2.0,
+) -> None:
+    """Reemplazo atomico con reintento acotado ante fallos transitorios.
+
+    Las herramientas de la sesion escriben dentro del mismo arbol que los
+    archivos IPC (`temp_parent=self.root`), asi que una colision
+    momentanea -- un antivirus, un git.exe hijo, un lector con el archivo
+    abierto -- es esperable, no hipotetica. El hallazgo Q ya demostro que
+    ocurre de verdad sobre owner-status.json.
+
+    Sin este reintento, un fallo de un instante en la ruta de un comando
+    ya aprobado sube hasta el `except BaseException` del propietario y
+    destruye la sesion viva de forma permanente, que es exactamente lo
+    que el punto 4 dice que nunca debe pasar.
+
+    Solo se reintenta el fallo generico `trial_process_failed`, que es el
+    que producen los errores nativos. Los codigos especificos
+    (`duplicate_command`, `invalid_status`, `invalid_trial_root`) son
+    decisiones, no accidentes, y se propagan de inmediato.
+    """
+    deadline = time.monotonic() + patience
+    while True:
+        try:
+            return _atomic_json_once(path, value, root, replace=replace)
+        except TrialProcessError as error:
+            if (
+                error.code != "trial_process_failed"
+                or time.monotonic() >= deadline
+            ):
+                raise
+            time.sleep(0.05)
+
+
+def _atomic_json_once(
     path: Path, value: dict, root: _StableRoot, *, replace=True
 ) -> None:
     if type(root) is not _StableRoot:
@@ -1867,7 +1902,16 @@ class _Owner:
                     )
                     continue
                 if command is not None:
-                    self.root_guard.delete_file(self.command_path.name)
+                    try:
+                        self.root_guard.delete_file(self.command_path.name)
+                    except (OSError, TrialProcessError):
+                        # Mismo cuidado que la ruta de comando rechazado,
+                        # que si lo tenia. Un handle retenido un instante
+                        # no puede costar la sesion: el comando sigue en
+                        # disco, intacto y sin consumir, y se reintenta en
+                        # la vuelta siguiente.
+                        time.sleep(0.05)
+                        continue
                     text = {
                         "approve_plan": "aprobar-plan",
                         "reject_plan": "rechazar-plan",

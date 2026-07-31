@@ -685,7 +685,7 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             destination.mkdir()
             with self.assertRaises(TrialProcessError):
                 _atomic_json(
-                    destination, {"safe": True}, root_guard,
+                    destination, {"safe": True}, root_guard, patience=0,
                 )
             self.assertTrue(destination.is_dir())
             self.assertEqual(
@@ -903,7 +903,7 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
                 destination = root / "owner-command.json"
                 destination.mkdir()
                 with self.assertRaises(TrialProcessError):
-                    _atomic_json(destination, {"b": 2}, guard)
+                    _atomic_json(destination, {"b": 2}, guard, patience=0)
                 self.assertEqual(
                     len(opened), len(closed), "camino de error desbalanceado"
                 )
@@ -1116,7 +1116,10 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
                 return_value=fijo,
             ):
                 with self.assertRaises(TrialProcessError):
-                    _atomic_json(root / "owner-status.json", {"a": 1}, guard)
+                    _atomic_json(
+                        root / "owner-status.json", {"a": 1}, guard,
+                        patience=0,
+                    )
 
             self.assertEqual(
                 outside.read_text(encoding="utf-8"), "intacto"
@@ -1147,7 +1150,7 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
                 bloqueado = root / "owner-command.json"
                 bloqueado.mkdir()
                 with self.assertRaises(TrialProcessError):
-                    _atomic_json(bloqueado, {"b": 2}, guard)
+                    _atomic_json(bloqueado, {"b": 2}, guard, patience=0)
 
                 self.assertEqual(
                     list(root.glob(".developerai-ipc-*.tmp")), [],
@@ -1255,6 +1258,77 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
                     guard.close()
             _purgar(primero)
             _purgar(segundo)
+
+
+    @unittest.skipUnless(os.name == "nt", "Windows native rename")
+    def test_atomic_json_survives_a_transient_native_failure(self):
+        """Un fallo de un instante no puede costar la sesion viva.
+
+        Las herramientas de la sesion escriben en el mismo arbol que el
+        IPC, asi que una violacion de comparticion momentanea es
+        esperable. Sin reintento, ese error sube hasta el
+        `except BaseException` del propietario y lo deja en `failed`
+        para siempre, aunque el problema durara milisegundos.
+        """
+        import trial_windows_fs as winfs
+
+        root = Path(tempfile.mkdtemp(
+            prefix="developerai-real-trial-"
+        )).resolve()
+        _secure_private_path(root, directory=True)
+        guard = None
+        try:
+            guard = _StableRoot(root, _path_identity(root))
+            destino = root / "owner-status.json"
+
+            real_rename = winfs.rename
+            state = {"calls": 0}
+
+            def flaky_rename(*args, **kwargs):
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    raise winfs.NativeFileError("ntstatus:c0000043")
+                return real_rename(*args, **kwargs)
+
+            with mock.patch.object(winfs, "rename", flaky_rename):
+                _atomic_json(destino, {"a": 1}, guard)
+
+            self.assertEqual(state["calls"], 2, "no hubo reintento")
+            self.assertEqual(
+                _read_json(destino, frozenset({"a"}), guard)["a"], 1
+            )
+            self.assertEqual(
+                list(root.glob(".developerai-ipc-*.tmp")), [],
+                "el intento fallido dejo un temporal",
+            )
+
+            # Un fallo permanente sigue fallando cerrado, no se cuelga.
+            def always_fails(*_args, **_kwargs):
+                raise winfs.NativeFileError("ntstatus:c0000043")
+
+            with mock.patch.object(winfs, "rename", always_fails):
+                with self.assertRaises(TrialProcessError) as caido:
+                    _atomic_json(destino, {"a": 2}, guard, patience=0)
+            self.assertEqual(caido.exception.code, "trial_process_failed")
+
+            # Y un codigo especifico NO se reintenta: es una decision,
+            # no un accidente. Debe propagarse de inmediato.
+            comando = root / "owner-command.json"
+            _atomic_json(comando, {"a": 1}, guard, replace=False)
+            inicio = time.monotonic()
+            with self.assertRaises(TrialProcessError) as duplicado:
+                _atomic_json(comando, {"a": 2}, guard, replace=False)
+            self.assertEqual(
+                duplicado.exception.code, "duplicate_command"
+            )
+            self.assertLess(
+                time.monotonic() - inicio, 1.0,
+                "duplicate_command se reintento en vez de propagarse",
+            )
+        finally:
+            if guard is not None:
+                guard.close()
+            _purgar(root)
 
 
 if __name__ == "__main__":

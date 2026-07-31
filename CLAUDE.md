@@ -52,7 +52,7 @@ El sistema no debe generar automáticamente un segundo plan cuando algo falla. D
 - Windows 11, Intel i5-12400F, 48 GB RAM, RTX 3090 (24 GB VRAM)
 - Modelo local: **Qwen3.6-35B-A3B** vía **LM Studio**, endpoint OpenAI-compatible en `http://localhost:1234/v1`
 - Ollama instalado pero el diseño gira alrededor del transporte de LM Studio
-- Sin `pytest.ini`, `pyproject.toml` ni `requirements.txt`. Suite en `tests/` (60 archivos)
+- Sin `pytest.ini`, `pyproject.toml` ni `requirements.txt`. Suite en `tests/` (59 archivos `.py`)
 
 **Ejecutar pruebas (PowerShell, desde la raíz del repo):**
 
@@ -117,9 +117,9 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 
 | Dato | Valor verificado |
 |---|---|
-| Rama / `HEAD` / `origin/master` | `master` / `cf6163b…` / igual, sincronizado |
-| Último commit | `cf6163b` — 3 archivos, 161 inserciones, 59 eliminaciones. Árbol limpio |
-| Suite completa | **697 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~48 s** |
+| Rama | `master`, sincronizada con `origin` |
+| `HEAD` | **Verifícalo siempre con `git log -1`.** Esta tabla se ha quedado obsoleta dos veces; no la creas sin comprobarla |
+| Suite completa | **698 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~60 s** |
 | Reproducibilidad | pasadas consecutivas en verde, banda estrecha de 42-43 s |
 | Fase 8.5 (proceso + harness) | **49 correctas, 0 fallos**, ~27 s |
 | `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
@@ -129,6 +129,22 @@ La suite tardaba 100-156 s con mucha varianza antes de corregir el hallazgo Q. A
 **Modo de desarrollador de Windows ACTIVADO**. Por eso ya no hay omitidas: las 13 pruebas de symlinks que antes se saltaban por `WinError 1314` ahora se ejecutan de verdad. Cualquier «0 fallos» anterior a esto era un falso verde.
 
 ### Hallazgos corregidos en esta sesión
+
+#### Hallazgo AF — CORREGIDO (31 jul 2026)
+
+**Lo encontró la reauditoría independiente, no el desarrollo.** Es el mismo esquema que K, N, O y Q —algo recuperable tratado como fatal— pero en la ruta más transitada del sistema y sin ninguna prueba que la cubriera.
+
+En el bucle del propietario, la ruta de **comando rechazado** sí reintentaba ante un fallo transitorio de borrado. La ruta de **comando aceptado** no protegía nada: ni el `delete_file` del comando consumido, ni `harness.execute`, ni el `publish` posterior. Cualquier `NativeFileError` transitorio ahí subía hasta el `except BaseException` y dejaba la sesión en `failed` de forma permanente.
+
+No era hipotético: `temp_parent=self.root` mete a git y a las herramientas de la sesión dentro del mismo árbol que el IPC, y el hallazgo Q ya demostró que las colisiones ocurren de verdad sobre `owner-status.json`.
+
+**Corrección, en tres partes:**
+
+1. `_atomic_json` reintenta hasta 2 s ante el fallo genérico `trial_process_failed`, que es el que producen los errores nativos. Cubre `persist`, `publish` y toda la escritura de estado. Los códigos específicos (`duplicate_command`, `invalid_status`, `invalid_trial_root`) **no** se reintentan: son decisiones, no accidentes.
+2. El `delete_file` del comando aceptado se protege igual que el del rechazado. El comando sigue en disco sin consumir y se reintenta en la vuelta siguiente.
+3. **`harness.execute` sigue sin reintento, a propósito.** Si falla a medias, el paso del workflow puede haberse aplicado parcialmente y repetirlo aplicaría dos veces una operación aprobada. Un fallo real de workflow debe llevar a `failed`; lo que no debía era que un fallo de *persistencia* lo hiciera.
+
+Prueba: `test_atomic_json_survives_a_transient_native_failure`.
 
 #### Hallazgo S — CORREGIDO (31 jul 2026)
 
@@ -182,7 +198,7 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 1. Línea 140: `_path_identity` retorna `(volume_serial, index)` para Windows
 2. Línea 163: Comparación completa del tuple en `_trial_root`
 3. Línea 242: Validación de identidad esperada usa comparación completa del tuple
-4. Línea 318: `file_exists` captura `TrialProcessError` para errores de seguridad
+4. ~~`file_exists` captura `TrialProcessError` para errores de seguridad~~ **ESTO ES FALSO Y ESTÁ REVERTIDO.** Se anota tachado a propósito: la reauditoría independiente detectó que esta línea contradecía al hallazgo G y al código real. Ver hallazgo G más abajo — `file_exists` **deja propagar** `TrialProcessError`; tragárselo dejaba invisible un archivo hostil
 
 #### Hallazgo G — PARCIAL (30 jul 2026)
 **Problema:** en Windows, `open_relative` lanza `NativeFileError` para *todos* los fallos, así que `file_exists` no distingue «no existe» de «acceso denegado».
