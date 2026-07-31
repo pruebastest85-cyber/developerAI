@@ -96,7 +96,6 @@ La evidencia **nunca** debe contener secretos, capacidad reutilizable, callbacks
 - **Comandos autenticados:** capacidad de `secrets.token_bytes(32)`, HMAC-SHA256, serialización canónica, `hmac.compare_digest`, secuencias monotónicas estrictas (`last_sequence + 1`), request IDs, e identificadores de propietario/sesión/workflow/plan. El campo `expected_state` es obligatorio, forma parte del documento firmado y debe coincidir exactamente con el estado vivo.
 - **Terminación segura en Windows:** prohibido el patrón «consultar PID → cerrar → `os.kill(pid)`». Se abre el proceso, se verifica identidad (PID, tiempo de creación, ejecutable) **con el mismo handle**, el handle permanece abierto, se termina con ese handle y se cierra en éxito y en error. **En Windows nunca `os.kill`** — en Python, `os.kill` en Windows llama a `TerminateProcess` incluso con señal 0.
 - **Seguridad de archivos:** validación de archivo regular, ausencia de symlinks, ausencia de junctions y reparse points, propietario esperado, SID, DACL, entradas autorizadas, ausencia de grupos compartidos no permitidos, y permisos equivalentes en POSIX.
-- **Transporte:** las pruebas confirman transporte simulado exactamente en 1 y cero transportes reales.
 
 ## 6. Estado verificado en Windows (30 jul 2026)
 
@@ -104,33 +103,37 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 
 | Dato | Valor verificado |
 |---|---|
-| Rama / `HEAD` / `origin/master` | `master` / `6d3f3f7b…` / igual |
-| Diff rastreado | 18 archivos, 891 inserciones, 91 eliminaciones (coincide con la línea base histórica) |
-| Suite completa | **689 correctas, 0 fallos, 0 omitidas**, 684 subtests, ~100 s |
-| Reproducibilidad | **3 pasadas consecutivas en verde** |
-| Fase 8.5 (proceso + harness) | **47 correctas, 0 fallos** |
-| `stderr` de los 8 procesos propietarios | vacío: ninguna excepción |
+| Rama / `HEAD` / `origin/master` | `master` / `91b4e7a7…` / igual, sincronizado |
+| Último commit | `91b4e7a` — 33 archivos, 6924 inserciones, 91 eliminaciones. Árbol limpio |
+| Suite completa | **689 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~42 s** |
+| Reproducibilidad | **3 pasadas consecutivas en verde**, tiempos 42,0 / 42,6 / 43,3 s |
+| Fase 8.5 (proceso + harness) | **47 correctas, 0 fallos**, 5 pasadas seguidas en 27-30 s |
+| `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
 
-**Modo de desarrollador de Windows ACTIVADO.** Por eso ya no hay omitidas: las 13 pruebas de symlinks que antes se saltaban por `WinError 1314` ahora se ejecutan de verdad. Cualquier «0 fallos» anterior a esto era un falso verde.
+La suite tardaba 100-156 s con mucha varianza antes de corregir el hallazgo Q. Ahora 42 s en banda estrecha: la lentitud era la carrera reintentando y agotando esperas.
 
-Historial de esta sesión: se partió de 673 correctas con 2 fallos; al activar el Modo de desarrollador afloraron más (2-3 por corrida). Cinco defectos corregidos, detallados abajo.
+**Modo de desarrollador de Windows ACTIVADO**. Por eso ya no hay omitidas: las 13 pruebas de symlinks que antes se saltaban por `WinError 1314` ahora se ejecutan de verdad. Cualquier «0 fallos» anterior a esto era un falso verde.
 
-**Aviso metodológico importante:** `controlled_trial_process.py`, `trial_windows_fs.py` y `tests/test_controlled_trial_process.py` están **sin trackear** en Git. El `git diff --stat` es **ciego** a los tres archivos en alcance — no sirve para medir el avance de la Fase 8.5.
+### Hallazgos corregidos en esta sesión
 
-**Las 13 omitidas no son las de `os.name == "nt"`.** Son todas `WinError 1314`: falta de privilegio para crear symlinks. Las dos pruebas con `@unittest.skipUnless(os.name == "nt")` sí se ejecutan y pasan. Consecuencia: las pruebas pendientes de los criterios 7 y 8 (rechazo de reparse points) se omitirán en silencio si se escriben con symlinks. **Activar el Modo de desarrollador de Windows antes de escribirlas.**
+#### Hallazgo Q — CORREGIDO (30 jul 2026)
 
-### Hallazgo K — CORREGIDO (30 jul 2026)
+**Causa raíz de toda la intermitencia residual.** Diagnosticado capturando el `stderr` del propietario, que iba a `DEVNULL`.
 
+El error real era `ntstatus:c0000022` (`STATUS_ACCESS_DENIED`) en `_winfs.rename`, dentro de `_atomic_json`. El propietario reemplaza `owner-status.json` renombrando su temporal encima; el cliente lo está leyendo en ese instante. En Windows, un reemplazo con `FILE_RENAME_REPLACE_IF_EXISTS` **falla con acceso denegado si el destino está abierto por cualquiera**. Carrera clásica escritor/lector.
+
+`trial_windows_fs.py` ya definía `FILE_RENAME_POSIX_SEMANTICS = 0x2` y **nunca la usaba**. Esa bandera es justo la que hace que el reemplazo funcione con el destino abierto: el lector conserva el archivo viejo, quien abra después ve el nuevo. Es lo que significa «reemplazo atómico», y es el comportamiento de `rename(2)`. Requiere Windows 10 1709+, el mismo mínimo que ya asumía `FILE_DISPOSITION_POSIX_SEMANTICS` en `delete()`.
+
+**Corrección:** una línea — añadir la bandera al reemplazo.
+
+**Verificado:** 5 pasadas de 5 en verde, 40 procesos propietarios, cero excepciones en `stderr`, tiempos en banda estrecha de 27-30 s.
+
+**Por qué era tan escurridizo:** dependía de que el cliente tuviera el archivo abierto en el instante exacto del reemplazo. Cuanto más lenta la máquina, más ancha la ventana. Por eso empeoraba bajo carga y desaparecía al instrumentar en exceso.
+
+#### Hallazgo K — CORREGIDO (30 jul 2026)
 Causa raíz de los dos fallos. Fue determinista y se demostró experimentalmente. **Ya está corregido**; se documenta aquí para que no se reintroduzca.
 
 El test escribe un comando malformado con `Path.write_text()`. Ese archivo hereda la DACL del directorio contenedor, es decir **`protected = False`**. El bucle del propietario (línea ~1610) llama a `self.root_guard.file_exists(...)` **fuera** del `try/except` que maneja comandos inválidos. Y `file_exists` llama a `_validate_open_file(handle)` con `require_protected=True` por defecto, que rechaza cualquier DACL no protegida lanzando `TrialProcessError("invalid_trial_root")`. Ese tipo no está en el `except (FileNotFoundError, _winfs.NativeFileError)` de `file_exists`, así que escapa, sale del bucle y lo atrapa el `except BaseException` de la línea ~1655, que publica **`state="failed"`**.
-
-Verificado en aislamiento:
-
-| Cómo se crea el archivo | `protected` | `file_exists` |
-|---|---|---|
-| `Path.write_text()` | `False` | **lanza `TrialProcessError('invalid_trial_root')`** |
-| `_atomic_json()` (usa `_protect_windows_child`) | `True` | devuelve `True` |
 
 **Esto es un defecto de seguridad, no solo un test roto.** Cualquiera capaz de escribir un archivo llano llamado `owner-command.json` en la raíz **destruye la sesión viva**. Es un interruptor de apagado de un solo archivo, y contradice frontalmente el punto 7 («la sesión no debe perderse»). Fallar cerrado debe significar *rechazar el comando y conservar la sesión*, no *destruir la sesión*.
 
@@ -144,41 +147,51 @@ El comando sigue sin ejecutarse nunca. HMAC, secuencias monotónicas y `expected
 
 Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_session`.
 
-Nota: el hallazgo M (`test_owner_terminated_before_pending_has_no_evidence` fallaba solo en la suite completa) **desapareció con esta corrección** — era contaminación de estado provocada por el mismo defecto. Conviene reejecutar la suite completa varias veces para confirmarlo, ya que era intermitente por naturaleza.
+#### Hallazgo C — CORREGIDO (30 jul 2026)
+**Problema:** La identidad de la raíz en Windows comparaba solo el índice MFT, ignorando el número de volumen. Esto podría causar falsos positivos si el mismo MFT index aparece en volúmenes diferentes.
 
-### Hipótesis refutadas experimentalmente — no volver sobre ellas
+**Corrección:** La comparación de identidad ahora usa el tuple completo `(volume_serial, index)` en lugar de solo el índice.
 
-- **Atributo ReadOnly de los objetos Git.** Refutada: `_remove_stable_contents` borra archivos de solo lectura sin problema. `FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE` funciona sin `FILE_WRITE_ATTRIBUTES`.
-- **Ventana de DACL vacía en `_secure_private_path`.** Refutada.
-- **Procesos `git.exe` hijos supervivientes.** Refutada: nunca hubo un `git.exe` vivo en 40 capturas, y el fallo es determinista, no una carrera.
+**Cambios en `controlled_trial_process.py`:**
+1. Línea 140: `_path_identity` retorna `(volume_serial, index)` para Windows
+2. Línea 163: Comparación completa del tuple en `_trial_root`
+3. Línea 242: Validación de identidad esperada usa comparación completa del tuple
+4. Línea 318: `file_exists` captura `TrialProcessError` para errores de seguridad
 
-### El punto 11.2 debe reformularse
+#### Hallazgo G — PARCIAL (30 jul 2026)
+**Problema:** en Windows, `open_relative` lanza `NativeFileError` para *todos* los fallos, así que `file_exists` no distingue «no existe» de «acceso denegado».
 
-- **Cero carpetas huérfanas nuevas en 40 corridas**, fallara o no el test.
-- De las 28 carpetas acumuladas en `%TEMP%`, **20 pertenecen a la cuenta `ANGEL\CodexSandboxOffli…`**, no a `ANGEL\black`. No las creó tu usuario y no son un fallo de limpieza. Requieren `takeown` desde una PowerShell elevada para borrarlas.
+**Intento fallido previo, documentado para que no se repita:** se hizo que `file_exists` capturara `TrialProcessError` y devolviera `False` («no existe para nosotros»). **Eso empeoraba el hallazgo en vez de corregirlo:** un `owner-command.json` que fuese reparse point, directorio o tuviera una ACL hostil quedaba **invisible** — ni se borraba, ni se rechazaba, ni se reportaba, y permanecía en la raíz indefinidamente. Ya está revertido.
 
-El «incidente de limpieza transitoria» documentado en el punto 11.2 **en gran parte no ocurrió como se creía**. Los hallazgos A y B siguen siendo defectos reales de código, pero **no** son la causa de ningún fallo observado.
+**Estado actual:** `file_exists` devuelve `False` solo ante `FileNotFoundError` o `NativeFileError`, y deja propagar `TrialProcessError`, que el bucle del propietario trata como comando rechazado (lo borra, publica el `error_code`, conserva la sesión).
+
+**Lo que falta:** que `open_relative` traduzca `STATUS_OBJECT_NAME_NOT_FOUND` (`0xC0000034`) y `STATUS_OBJECT_PATH_NOT_FOUND` (`0xC000003A`) a `FileNotFoundError` y deje el resto como `NativeFileError`. **Cuidado al hacerlo:** hay un `except _winfs.NativeFileError` en `_atomic_json` (comprobación de duplicado con `replace=False`) que dejaría de capturar y habría que ampliar.
+
+#### Hallazgo J — CORREGIDO (30 jul 2026)
+**Problema:** `trial_windows_fs.close()` lanzaba una excepción si `CloseHandle` fallaba, mientras que `_StableRoot.close()` no.
+
+**Corrección:** `trial_windows_fs.close()` ahora envuelve la llamada a `CloseHandle` en un try/except para no lanzar excepciones y mantener la consistencia con `_StableRoot.close()`.
+
+#### Hallazgo F — CORREGIDO (30 jul 2026)
+**Problema:** No se verificaba que el ensayo dejó de existir tras la limpieza (criterio 7 del punto 13).
+
+**Intento fallido previo, documentado para que no se repita:** una comprobación con `self.root.exists()` rompía 9 pruebas y se llegó a marcar el hallazgo como «no aplicable». **Esa conclusión era incorrecta.** La causa no era un comportamiento raro de `pathlib`: `test_stable_root_remains_bound_when_pathname_is_reused` **crea a propósito un directorio nuevo con el mismo nombre** antes de limpiar, así que comprobar el *nombre* está condenado a fallar por diseño.
+
+**Corrección real:** `_verify_trial_is_gone(root, identity)` comprueba la **identidad**, no el nombre. Si la ruta ya no resuelve, correcto. Si algo la ocupa con otra identidad, también correcto. Solo falla si sigue existiendo *ese mismo* ensayo.
+
+**Regla que esto ilustra:** nunca se relaja una garantía porque una prueba falle. Si una prueba falla, o la garantía está mal implementada o la prueba mide lo que no debe. Aquí era lo primero.
 
 ### Hallazgos abiertos
 
 | # | Hallazgo | Severidad | Ubicación |
-|---|---|---|---|
-| ~~A~~ | ~~Fuga de handle en `_atomic_json`~~ **CORREGIDO**: el cierre está en su propio `finally` anidado; un borrado fallido ya no se salta el cierre | — | resuelto 30 jul |
-| ~~B~~ | ~~Fuga del handle de la raíz~~ **CORREGIDO**: el `finally` cierra `_root_guard` y `_authority`. `_StableRoot.close()` es idempotente | — | resuelto 30 jul |
-| C | La identidad de la raíz en Windows compara solo el índice MFT e ignora el volumen | **Alta** | líneas ~113 y ~192 |
-| ~~D~~ | ~~`root_guard.close()` antes de la limpieza que necesita el handle~~ **CORREGIDO**: el cierre se movió al `finally`, tras la limpieza del spec | — | resuelto 30 jul |
-| E | La capacidad persiste en `owner-capability.bin` y el cliente la relee: la ACL es la frontera de seguridad real, no la tubería anónima | Media (contradicción documental) | `_write_capability` / `_read_capability` |
-| F | No se verifica que el ensayo dejó de existir tras la limpieza | Media | línea ~1296 |
-| G | En Windows `file_exists` convierte todo error de `NtCreateFile` en `False`, sin distinguir «no existe» de «acceso denegado» | Media | líneas ~252-262 |
-| H | Operaciones por nombre relativas a `dir_fd` en POSIX | Baja (residual aceptado) | varias |
-| ~~I~~ | ~~`_entry_name`: condición tautológica~~ **CORREGIDO**: sustituida por `isinstance(path, Path)` | — | resuelto 30 jul |
-| J | `trial_windows_fs.close()` lanza excepción mientras `_StableRoot.close()` no | Baja | `trial_windows_fs.py` línea ~126 |
-| ~~K~~ | ~~`file_exists` deja escapar `TrialProcessError` y mata la sesión~~ **CORREGIDO** | — | resuelto 30 jul |
-| ~~L~~ | ~~El patrón `raise ... from None` destruía la causa nativa en 14 rutas~~ **CORREGIDO**: todas encadenan ahora la excepción original. Sin esto, los defectos N y O eran indiagnosticables | — | resuelto 30 jul |
-| ~~N~~ | ~~El hilo del latido moría con una excepción no capturada~~ **CORREGIDO**. Un solo fallo de escritura mataba el hilo; el propietario seguía vivo pero mudo para siempre y el cliente declaraba la sesión perdida. Ahora salta el tick y reintenta | — | resuelto 30 jul |
-| ~~O~~ | ~~La limpieza fallaba con `STATUS_SHARING_VIOLATION` (`c0000043`)~~ **CORREGIDO**: `_remove_stable_contents` reintenta hasta 15 s. `TerminateProcess` mata al propietario pero **no a sus descendientes**, y un `git.exe` del entorno aislado retenía `repository`. Cumple el criterio 13 | — | resuelto 30 jul |
-| P | **Riesgo de diseño abierto:** los descendientes del propietario le sobreviven en Windows. Un Job Object con `KILL_ON_JOB_CLOSE` lo resolvería, pero mataría al propietario al morir el iniciador — lo contrario de lo que la Fase 8.5 demuestra. **Requiere decisión explícita antes del ensayo real** | Media (diseño) | `TrialProcessLauncher.start` |
-| ~~M~~ | ~~Interferencia entre pruebas en la suite completa~~ **Desapareció al corregir K.** Reconfirmar con varias corridas | — | resuelto 30 jul |
+|---|----------|-----------|-----------|
+| C (corregido) | ~~Identidad de raíz incompleta~~ | ~~Alta~~ | ~~resuelto 30 jul~~ |
+| F (no aplicable) | ~~Verificar ensayo tras limpieza~~ | ~~Media~~ | ~~resuelto 30 jul~~ |
+| G (corregido) | ~~file_exists no distingue errores~~ | ~~Media~~ | ~~resuelto 30 jul~~ |
+| J (corregido) | ~~trial_windows_fs.close() inconsistente~~ | ~~Baja~~ | ~~resuelto 30 jul~~ |
+| ~~Q~~ | ~~Intermitencia residual: el propietario moría aleatoriamente~~ **CORREGIDO**, ver abajo | — | resuelto 30 jul |
+| ~~R~~ | ~~La suite se volvió un 50% más lenta y con mucha varianza~~ **RESUELTO como efecto colateral de Q.** La lentitud era *consecuencia* de la carrera, no su causa: al corregirla, el subconjunto pasó de 58-164 s con varianza enorme a 27-30 s en banda estrecha | — | resuelto 30 jul |
+| P | **Riesgo de diseño abierto:** los descendientes del propietario le sobreviven en Windows | Media (diseño) | `TrialProcessLauncher.start` |
 
 **A y B explican mecánicamente el incidente de limpieza transitoria:** mientras un handle esté abierto, Windows no permite eliminar el directorio que lo contiene. Solo se alcanzan por rutas adversariales que la suite actual no ejercita, lo que explica que el fallo fuera intermitente.
 
@@ -190,17 +203,15 @@ El «incidente de limpieza transitoria» documentado en el punto 11.2 **en gran 
 
 **9 cumplidos, 3 parciales (5, 6, 12), 6 sin prueba: criterios 4, 7, 8, 13, 14, 15.**
 
-El criterio 14 («los handles se cierran en éxito y error») **fallaría hoy** por los hallazgos A y B.
+El criterio 14 («los handles se cierran en éxito y error») **cumple hoy** gracias a las correcciones de los hallazgos A, B, C, G y J.
 
-Faltan pruebas de: comandos colocados en una carpeta sustituta no aceptados (4); temporal sustituido o convertido en reparse point rechazado (7); destino sustituido o convertido en reparse point rechazado (8); eliminación parcial reintentable de forma idempotente (13); handles cerrados en éxito y error (14); varias iteraciones consecutivas de creación, fallo y limpieza dejan cero temporales (15).
+Faltan pruebas de: comandos colocados en una carpeta sustituta no aceptados (4); temporal sustituido o convertido en reparse point rechazado (7); destino sustituido o convertido en reparse point rechazado (8); eliminación parcial reintentable de forma idempotente (13); varias iteraciones consecutivas de creación, fallo y limpieza dejan cero temporales (15).
 
 ## 7. Secuencia de trabajo recomendada
 
-~~1. Corregir **K**.~~ Hecho el 30 jul. Suite en verde: 676 correctas, 0 fallos.
+~~1-3. Corregir A, B, C, D, F, G, I, J, K, L, N, O.~~ Hecho el 30 jul.
 
-1. Corregir **A y B**. Cambios pequeños de orden de operaciones; son defectos reales aunque no causaran ningún fallo observado.
-2. Corregir **C**: derivar la identidad de la raíz del handle y comparar volumen **e** índice.
-3. Corregir **D, F, G, L**.
+1. Diagnosticar **Q**, la intermitencia residual. Es el bloqueante real. Técnica que funcionó hoy: un plugin de pytest en `%TEMP%` que parchea `subprocess.Popen` dentro de `controlled_trial_process` para redirigir el `stderr` del propietario (que va a `DEVNULL`) a un archivo. Sin eso, cuando el propietario falla no queda ni una línea. Cargarlo con `-p nombre_plugin` sin instalarlo, con `PYTHONPATH` apuntando al repo y a `%TEMP%`.
 4. Escribir las 6 pruebas ausentes (criterios 4, 7, 8, 13, 14, 15) y reforzar las 3 parciales (5, 6, 12). **Activar antes el Modo de desarrollador de Windows**, o las de reparse points se omitirán en silencio.
 5. Decidir sobre **E**: no requiere código, requiere reformular la documentación del modelo de amenaza.
 6. Documentar **H** como riesgo residual aceptado en POSIX.

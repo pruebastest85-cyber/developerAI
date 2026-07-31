@@ -125,8 +125,13 @@ def _raise_last_error():
 
 def close(handle):
     if handle not in {None, INVALID_HANDLE_VALUE}:
-        if not _kernel().CloseHandle(handle):
-            _raise_last_error()
+        try:
+            if not _kernel().CloseHandle(handle):
+                _raise_last_error()
+        except NativeFileError:
+            # Cierre fallido: no lanzar excepción para mantener la consistencia
+            # con _StableRoot.close() que siempre cierra en éxito y error.
+            pass
 
 
 def open_relative(
@@ -249,7 +254,18 @@ def rename(handle, root_handle, destination, *, replace):
     header_size = _FileRenameHeader.FileNameLength.offset + 4
     buffer = ctypes.create_string_buffer(header_size + len(encoded))
     header = _FileRenameHeader.from_buffer(buffer)
-    header.Flags = FILE_RENAME_REPLACE_IF_EXISTS if replace else 0
+    # POSIX semantics are what make an atomic replace actually atomic on
+    # Windows: without them, replacing a destination that any reader has
+    # open fails with STATUS_ACCESS_DENIED (0xc0000022). That was a real
+    # race between the owner publishing status and the client reading it,
+    # and it killed the live session. With POSIX semantics the reader
+    # keeps the old file and later opens see the new one, exactly like
+    # rename(2). Requires Windows 10 1709+, the same floor already
+    # assumed by FILE_DISPOSITION_POSIX_SEMANTICS in delete().
+    header.Flags = (
+        FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+        if replace else 0
+    )
     header.RootDirectory = root_handle
     header.FileNameLength = len(encoded)
     ctypes.memmove(ctypes.addressof(buffer) + header_size, encoded, len(encoded))

@@ -89,7 +89,57 @@ class TrialProcessError(RuntimeError):
         super().__init__(f"Fallo cerrado del proceso de ensayo: {self.code}.")
 
 
+def _open_windows_directory(path: Path):
+    """Open a directory handle by pathname, for identity derivation only."""
+    kernel = ctypes.windll.kernel32
+    create_file = kernel.CreateFileW
+    create_file.restype = ctypes.c_void_p
+    create_file.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong,
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+        ctypes.c_void_p,
+    ]
+    handle = create_file(
+        str(path),
+        0x0001 | 0x0080 | 0x00010000 | 0x00020000,
+        0x1 | 0x2 | 0x4,
+        None,
+        3,                 # OPEN_EXISTING
+        0x02000000 | 0x00200000,  # BACKUP_SEMANTICS|OPEN_REPARSE
+        None,
+    )
+    if handle in {None, ctypes.c_void_p(-1).value}:
+        raise OSError("CreateFileW failed")
+    return handle
+
+
+def _close_windows_handle(handle) -> None:
+    if handle in {None, ctypes.c_void_p(-1).value}:
+        return
+    close_handle = ctypes.windll.kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    close_handle(handle)
+
+
 def _path_identity(path: Path):
+    """Directory identity, always derived from a single source.
+
+    On Windows this opens a handle instead of calling os.stat. Python's
+    st_dev is not guaranteed to hold the same value as the volume serial
+    reported by GetFileInformationByHandle, and mixing both sources is
+    exactly what forced every comparison to ignore the volume and trust
+    only the MFT index -- which is unique per volume, not per machine.
+    """
+    if os.name == "nt":
+        try:
+            handle = _open_windows_directory(path)
+        except OSError as error:
+            raise TrialProcessError("invalid_trial_root") from error
+        try:
+            return _windows_handle_identity(handle)[0]
+        finally:
+            _close_windows_handle(handle)
     try:
         value = path.stat()
     except OSError as error:
@@ -110,7 +160,7 @@ def _trial_root(path, expected_identity=None) -> Path:
         or not resolved.name.startswith(_ROOT_PREFIX)
         or expected_identity is not None
         and (
-            _path_identity(resolved)[1] != expected_identity[1]
+            _path_identity(resolved) != expected_identity
             if os.name == "nt"
             else _path_identity(resolved) != expected_identity
         )
@@ -161,8 +211,10 @@ class _StableRoot:
 
     def __init__(self, path, expected_identity=None):
         self.path = _trial_root(path, expected_identity)
-        path_identity = _path_identity(self.path)
-        self.identity = path_identity
+        # On Windows the identity is taken from the real handle below, so
+        # deriving it here from the pathname would open a second handle
+        # and throw the result away.
+        self.identity = None if os.name == "nt" else _path_identity(self.path)
         self._handle = None
         try:
             if os.name == "nt":
@@ -189,7 +241,7 @@ class _StableRoot:
                 handle_identity, _attributes = _windows_handle_identity(handle)
                 if (
                     expected_identity is not None
-                    and handle_identity[1] != expected_identity[1]
+                    and handle_identity != expected_identity
                 ):
                     raise TrialProcessError("invalid_trial_root")
                 self.identity = handle_identity
@@ -263,6 +315,11 @@ class _StableRoot:
             return True
         except (FileNotFoundError, _winfs.NativeFileError):
             return False
+        # A TrialProcessError here means the entry exists but is not a
+        # legitimate regular file (reparse point, directory, hostile
+        # ACL). It must NOT be reported as absent: the owner loop treats
+        # it as a rejected command, deletes it and keeps the session.
+        # Swallowing it would leave a hostile entry invisible forever.
         finally:
             if handle is not None:
                 self.close_child(handle)
@@ -1319,6 +1376,8 @@ class TrialProcessClient:
                     os.rmdir(self.root.name, dir_fd=parent)
                 finally:
                     os.close(parent)
+            self._root_guard.close()
+            _verify_trial_is_gone(self.root, self.handle.root_identity)
             self._cleaned = True
         except (OSError, _winfs.NativeFileError) as error:
             raise TrialProcessError() from error
@@ -1330,6 +1389,22 @@ class TrialProcessClient:
             except OSError:
                 pass
             self._authority.close()
+
+
+def _verify_trial_is_gone(root: Path, identity) -> None:
+    """Criterion 7: the exact trial must no longer exist after cleanup.
+
+    Checking the pathname is not enough and would be wrong: a different
+    directory may legitimately occupy the same name once ours is gone,
+    and an adversarial test does exactly that. What must have
+    disappeared is this identity, not this name.
+    """
+    try:
+        remaining = _path_identity(root)
+    except TrialProcessError:
+        return          # the pathname resolves to nothing: correct
+    if remaining == identity:
+        raise TrialProcessError()
 
 
 def _remove_stable_contents(root: _StableRoot, *, patience=15.0) -> None:
