@@ -121,8 +121,8 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 |---|---|
 | Rama | `master`, sincronizada con `origin` |
 | `HEAD` | **Verifícalo siempre con `git log -1`.** Esta tabla se ha quedado obsoleta dos veces; no la creas sin comprobarla |
-| Suite completa | **698 correctas, 0 fallos, 0 omitidas**, 684 subtests |
-| Fase 8.5 (proceso + harness) | **56 correctas, 0 fallos** |
+| Suite completa | **700 correctas, 0 fallos, 0 omitidas**, 684 subtests |
+| Fase 8.5 (proceso + harness) | **58 correctas, 0 fallos** |
 | Tiempo | Muy dependiente de la carga: medido entre 42 s y 63 s la suite completa, y entre 27 s y 55 s el subconjunto, en la misma máquina el mismo día. **No uses el tiempo como señal de regresión sin comparar dos corridas contiguas.** |
 | Reproducibilidad | 3 pasadas consecutivas en verde, cero omitidas confirmado con `-ra` |
 | `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
@@ -236,7 +236,7 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 | J (corregido) | ~~trial_windows_fs.close() inconsistente~~ | ~~Baja~~ | ~~resuelto 30 jul~~ |
 | ~~Q~~ | ~~Intermitencia residual: el propietario moría aleatoriamente~~ **CORREGIDO**, ver abajo | — | resuelto 30 jul |
 | ~~R~~ | ~~La suite se volvió un 50% más lenta y con mucha varianza~~ **RESUELTO como efecto colateral de Q.** La lentitud era *consecuencia* de la carrera, no su causa: al corregirla, el subconjunto pasó de 58-164 s con varianza enorme a 27-30 s en banda estrecha | — | resuelto 30 jul |
-| ~~P~~ | ~~Los descendientes del propietario le sobreviven en Windows~~ **CORREGIDO (31 jul)**: `_bind_owner_to_job()` asigna al propietario a un Job Object con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` al arrancar `_Owner.run()`. Los hijos heredan la pertenencia y mueren con él. El iniciador **no** está en el job. **Ojo con lo que está y no está probado:** `test_owner_survives_a_completely_separate_initiator` verifica la propiedad *complementaria* —que el job no rompe la premisa de la Fase 8.5— pero **no existe ninguna prueba de que los hijos mueran con el propietario**. Ese mecanismo está implementado y razonado, no verificado. Lo detectó la segunda reauditoría independiente tras una afirmación errónea de este documento. El handle del job se deja abierto a propósito: es el mecanismo. Si el sistema rechaza la asignación, el propietario sigue vivo: es endurecimiento de limpieza, no una frontera de seguridad | — | resuelto 31 jul |
+| ~~P~~ | ~~Los descendientes del propietario le sobreviven en Windows~~ **CORREGIDO (31 jul)**: `_bind_owner_to_job()` asigna al propietario a un Job Object con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` al arrancar `_Owner.run()`. Los hijos heredan la pertenencia y mueren con él. El iniciador **no** está en el job, así que la premisa de la Fase 8.5 se conserva: `test_owner_survives_a_completely_separate_initiator`. Y desde el 31 jul el mecanismo está **probado de verdad**, no solo razonado: `test_owner_job_object_kills_its_descendants` lanza un proceso que se une al job y engendra un nieto, lo mata con `TerminateProcess` —que por sí solo no toca al nieto— y comprueba que el nieto muere igualmente. Esa prueba nació porque la segunda reauditoría detectó que este documento afirmaba «verificado explícitamente» citando la prueba de la propiedad contraria. El handle del job se deja abierto a propósito: es el mecanismo. Si el sistema rechaza la asignación, el propietario sigue vivo: es endurecimiento de limpieza, no una frontera de seguridad | — | resuelto 31 jul |
 | ~~T~~ | ~~Las pruebas dejan carpetas en `%TEMP%`~~ **FALSA ALARMA, medido el 31 jul**: 62 carpetas antes de la suite y 62 después, cero avisos. Las pruebas no filtran nada; lo acumulado es histórico de días anteriores, incluidas ~20 de la cuenta `CodexSandboxOffli…` que requieren `takeown` desde una consola elevada. Aun así se sustituyeron los 14 `shutil.rmtree(..., ignore_errors=True)` por el helper `_purgar`, que reintenta y **avisa con el motivo** si alguna vez falla un borrado, en lugar de callarlo | — | resuelto 31 jul |
 | ~~P-viejo~~ | ~~Riesgo de diseño abierto: los descendientes del propietario le sobreviven en Windows~~ | Media (diseño) | `TrialProcessLauncher.start` |
 
@@ -271,7 +271,9 @@ Faltan pruebas de: comandos colocados en una carpeta sustituta no aceptados (4);
 
 ~~1-3. Corregir A, B, C, D, F, G, I, J, K, L, N, O.~~ Hecho el 30 jul.
 
-**Todos los hallazgos están cerrados y los 18 criterios cubiertos. Lo único que queda antes del ensayo real es la reauditoría independiente del punto 8.**
+**Hueco de cobertura reconocido y NO cerrado — hallazgo AF-4.** No existe prueba de integración que ejercite el bucle real de `_Owner.run()` con un fallo transitorio inyectado. La resiliencia de esa ruta está probada solo por unidades (`_with_patience`, `_atomic_json`). Cubrirla exige o ejecutar `_Owner.run()` dentro del proceso de pruebas con `stdin` simulado —con riesgo de colgar la suite— o parchear dentro del subproceso hijo. Es trabajo aparte con riesgo propio. **No escribir una prueba débil y etiquetarla como de integración.**
+
+**Los 18 criterios están cubiertos y todos los hallazgos cerrados salvo AF-4. Antes del ensayo real hace falta al menos una reauditoría independiente más.**
 
 **Advertencia sobre la independencia:** quien haya escrito las correcciones no puede auditarlas. La reauditoría debe hacerla una sesión distinta, partiendo de este archivo y del código, sin saber qué se cambió ni por qué. Si la hace quien corrigió, no es una auditoría: es una relectura de sus propias suposiciones.
 

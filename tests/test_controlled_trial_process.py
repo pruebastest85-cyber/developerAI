@@ -1331,5 +1331,106 @@ class ControlledTrialProcessSecurityTests(unittest.TestCase):
             _purgar(root)
 
 
+    def test_with_patience_retries_transient_and_propagates_permanent(self):
+        """El helper que sostiene AF-1, AF-2 y AF-3.
+
+        Debe absorber un fallo pasajero, propagar uno permanente en vez
+        de girar en vacio, y respetar la cota de tiempo. Sin la cota, el
+        propietario se quedaba vivo sin publicar nada y el cliente no
+        tenia forma de detectarlo.
+        """
+        from controlled_trial_process import _with_patience
+
+        state = {"calls": 0}
+
+        def transitorio():
+            state["calls"] += 1
+            if state["calls"] < 3:
+                raise OSError("colision pasajera")
+            return "ok"
+
+        self.assertEqual(_with_patience(transitorio, patience=2.0), "ok")
+        self.assertEqual(state["calls"], 3)
+
+        def permanente():
+            raise TrialProcessError("invalid_status")
+
+        inicio = time.monotonic()
+        with self.assertRaises(TrialProcessError) as caido:
+            _with_patience(permanente, patience=0.3)
+        transcurrido = time.monotonic() - inicio
+        self.assertEqual(caido.exception.code, "invalid_status")
+        self.assertGreaterEqual(transcurrido, 0.3)
+        self.assertLess(transcurrido, 3.0, "no respeto la cota")
+
+        # patience=0 debe propagar al primer intento, sin dormir.
+        with self.assertRaises(OSError):
+            _with_patience(lambda: (_ for _ in ()).throw(OSError("x")),
+                           patience=0)
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object")
+    def test_owner_job_object_kills_its_descendants(self):
+        """Hallazgo P, por fin verificado en vez de solo razonado.
+
+        TerminateProcess mata un proceso, no su arbol. El Job Object con
+        KILL_ON_JOB_CLOSE debe hacer que los hijos mueran con el
+        propietario. La segunda reauditoria senalo que este mecanismo
+        estaba implementado pero sin ninguna prueba.
+        """
+        from controlled_trial_process import _is_alive
+
+        repo = str(Path(__file__).resolve().parent.parent)
+        guion = Path(tempfile.mkdtemp()) / "intermedio.py"
+        guion.write_text(
+            "import subprocess, sys, time\n"
+            f"sys.path.insert(0, {repo!r})\n"
+            "import controlled_trial_process as ctp\n"
+            "ctp._bind_owner_to_job()\n"
+            "nieto = subprocess.Popen(\n"
+            "    [sys.executable, '-c', 'import time; time.sleep(120)']\n"
+            ")\n"
+            "print(nieto.pid, flush=True)\n"
+            "time.sleep(120)\n",
+            encoding="utf-8",
+        )
+        intermedio = subprocess.Popen(
+            [sys.executable, str(guion)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        nieto_pid = None
+        try:
+            linea = intermedio.stdout.readline()
+            nieto_pid = int(linea.strip())
+            self.assertTrue(_is_alive(nieto_pid), "el nieto no arranco")
+
+            # TerminateProcess sobre el intermedio: no toca al nieto por
+            # si mismo. Si el job funciona, el nieto muere igualmente.
+            intermedio.kill()
+            intermedio.wait(timeout=10)
+
+            limite = time.monotonic() + 10
+            while time.monotonic() < limite:
+                if not _is_alive(nieto_pid):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(
+                _is_alive(nieto_pid),
+                "el nieto sobrevivio al propietario: el Job Object no "
+                "esta surtiendo efecto",
+            )
+        finally:
+            if intermedio.poll() is None:
+                intermedio.kill()
+                intermedio.wait(timeout=10)
+            if nieto_pid is not None and _is_alive(nieto_pid):
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(nieto_pid)],
+                    capture_output=True,
+                )
+            _purgar(guion.parent)
+
+
 if __name__ == "__main__":
     unittest.main()
