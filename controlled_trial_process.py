@@ -494,8 +494,42 @@ def _verify_windows_security_value(value, *, require_protected=True) -> None:
         raise TrialProcessError("invalid_trial_root")
 
 
-def _protect_windows_child(root_handle, child_handle) -> None:
-    """Copy the verified root DACL to an opened child and protect it."""
+def _with_patience(operation, patience=5.0):
+    """Reintenta una operacion nativa ante fallos transitorios.
+
+    Un handle retenido un instante por otro proceso del mismo arbol
+    -- git, el indexador, un antivirus -- no puede costar la sesion
+    viva. Pero agotada la paciencia se propaga: un fallo permanente si
+    debe fallar cerrado, y nunca dejar al propietario girando en vacio.
+    """
+    deadline = time.monotonic() + patience
+    while True:
+        try:
+            return operation()
+        except (OSError, TrialProcessError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _protect_windows_child(root_handle, child_handle, *, patience=2.0):
+    """Copy the verified root DACL to an opened child and protect it.
+
+    Las llamadas de seguridad se reintentan de forma acotada: pueden
+    fallar transitoriamente por interferencia de otro proceso sobre el
+    mismo arbol, y ese fallo levantaba `invalid_trial_root`, un codigo
+    especifico que el reintento de `_atomic_json` no cubre. La
+    verificacion final NO se reintenta: una ACL incorrecta es una
+    decision, no un accidente.
+    """
+    _with_patience(
+        lambda: _apply_root_dacl(root_handle, child_handle),
+        patience=patience,
+    )
+    _verify_windows_security_handle(child_handle)
+
+
+def _apply_root_dacl(root_handle, child_handle) -> None:
     owner = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     descriptor = ctypes.c_void_p()
@@ -517,7 +551,6 @@ def _protect_windows_child(root_handle, child_handle) -> None:
             raise TrialProcessError("invalid_trial_root")
     finally:
         ctypes.windll.kernel32.LocalFree(descriptor)
-    _verify_windows_security_handle(child_handle)
 
 
 def _secure_private_path(path: Path, *, directory: bool) -> None:
@@ -1861,7 +1894,12 @@ class _Owner:
             raw_request = b""
             encoded_capability = None
             if self.root_guard.file_exists(self.spec_path.name):
-                self.root_guard.delete_file(self.spec_path.name)
+                # Mismo cuidado que el borrado del comando: una colision
+                # transitoria aqui mataba la sesion en el arranque, antes
+                # incluso de que existiera un estado publicado.
+                _with_patience(
+                    lambda: self.root_guard.delete_file(self.spec_path.name)
+                )
             self.publish("planning")
             heartbeat = threading.Thread(target=self.heartbeat, daemon=True)
             heartbeat.start()
@@ -1889,29 +1927,28 @@ class _Owner:
                             command, self.current, self.authority
                         )
                 except TrialProcessError as error:
-                    try:
-                        self.root_guard.delete_file(
+                    # Acotado a proposito: sin limite, un fallo permanente
+                    # dejaba al propietario girando a 20 Hz sin publicar
+                    # nada, y el cliente no puede detectarlo porque el
+                    # latido solo se actualiza en 'starting' y 'planning'.
+                    _with_patience(
+                        lambda: self.root_guard.delete_file(
                             self.command_path.name
-                        )
-                    except (OSError, TrialProcessError):
-                        time.sleep(0.01)
-                        continue
+                        ),
+                        patience=10.0,
+                    )
                     self.publish(
                         self.current["state"],
                         error_code=error.code,
                     )
                     continue
                 if command is not None:
-                    try:
-                        self.root_guard.delete_file(self.command_path.name)
-                    except (OSError, TrialProcessError):
-                        # Mismo cuidado que la ruta de comando rechazado,
-                        # que si lo tenia. Un handle retenido un instante
-                        # no puede costar la sesion: el comando sigue en
-                        # disco, intacto y sin consumir, y se reintenta en
-                        # la vuelta siguiente.
-                        time.sleep(0.05)
-                        continue
+                    _with_patience(
+                        lambda: self.root_guard.delete_file(
+                            self.command_path.name
+                        ),
+                        patience=10.0,
+                    )
                     text = {
                         "approve_plan": "aprobar-plan",
                         "reject_plan": "rechazar-plan",

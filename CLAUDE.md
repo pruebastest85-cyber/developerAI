@@ -109,7 +109,9 @@ Esto no es un defecto: es necesario para el requisito central de la Fase 8.5, po
 
 **Hallazgo H — riesgo residual aceptado en POSIX.** En POSIX, varias operaciones actúan por nombre relativo a un descriptor de directorio ya verificado (`os.open`, `os.unlink`, `os.rename`/`os.replace` con `dir_fd`, y el `os.rmdir` final sobre el padre). El `dir_fd` ancla la operación al *objeto* directorio, así que el directorio no puede sustituirse; solo la entrada dentro de él. POSIX no ofrece un `unlinkat` por descriptor de archivo, de modo que no hay alternativa. Con la raíz en modo `0700` y propiedad del usuario, el riesgo queda acotado.
 
-**Decisión: se acepta como riesgo residual y no se persigue.** El hallazgo 11.1 está redactado para Windows, y en Windows todas esas rutas usan handles. La única que merece vigilancia es la apertura del **padre** por pathname en la limpieza POSIX, porque suele ser `/tmp`, escribible por todos aunque con bit sticky.
+**Hallazgo Info-1 — riesgo residual aceptado: estado publicado vs. estado real.** `harness.execute` no se reintenta a propósito, y ese razonamiento es correcto. Pero queda una ventana estrecha de doble fallo: si `_operator.execute` muta el repositorio de verdad —aplica un parche aprobado— y el `persist()` posterior agota sus 2 s de reintento o falla con un código no reintentable, la sesión acaba en `failed` **aunque la operación aprobada sí se aplicó**. No es pérdida de autoridad ni ejecución no autorizada: es una discrepancia entre lo que pasó y lo que el estado publicado dice que pasó. Se acepta y se documenta en vez de dejarlo implícito.
+
+**Decisión sobre H: se acepta como riesgo residual y no se persigue.** El hallazgo 11.1 está redactado para Windows, y en Windows todas esas rutas usan handles. La única que merece vigilancia es la apertura del **padre** por pathname en la limpieza POSIX, porque suele ser `/tmp`, escribible por todos aunque con bit sticky.
 
 ## 6. Estado verificado en Windows (30 jul 2026)
 
@@ -119,12 +121,13 @@ Cifras **medidas**, no heredadas. Sustituyen a cualquier cifra anterior.
 |---|---|
 | Rama | `master`, sincronizada con `origin` |
 | `HEAD` | **Verifícalo siempre con `git log -1`.** Esta tabla se ha quedado obsoleta dos veces; no la creas sin comprobarla |
-| Suite completa | **698 correctas, 0 fallos, 0 omitidas**, 684 subtests, **~60 s** |
-| Reproducibilidad | pasadas consecutivas en verde, banda estrecha de 42-43 s |
-| Fase 8.5 (proceso + harness) | **49 correctas, 0 fallos**, ~27 s |
+| Suite completa | **698 correctas, 0 fallos, 0 omitidas**, 684 subtests |
+| Fase 8.5 (proceso + harness) | **56 correctas, 0 fallos** |
+| Tiempo | Muy dependiente de la carga: medido entre 42 s y 63 s la suite completa, y entre 27 s y 55 s el subconjunto, en la misma máquina el mismo día. **No uses el tiempo como señal de regresión sin comparar dos corridas contiguas.** |
+| Reproducibilidad | 3 pasadas consecutivas en verde, cero omitidas confirmado con `-ra` |
 | `stderr` de los procesos propietarios | vacío en los 24: ninguna excepción |
 
-La suite tardaba 100-156 s con mucha varianza antes de corregir el hallazgo Q. Ahora 42 s en banda estrecha: la lentitud era la carrera reintentando y agotando esperas.
+Antes de corregir el hallazgo Q la suite tardaba 100-156 s, con varianza enorme incluso entre corridas consecutivas. Tras la corrección bajó de forma clara y la varianza se redujo mucho, aunque el tiempo sigue dependiendo de la carga de la máquina (ver fila «Tiempo» arriba). Lo que se demostró es que buena parte de aquella lentitud era la carrera reintentando y agotando esperas, no que exista una banda fija.
 
 **Modo de desarrollador de Windows ACTIVADO**. Por eso ya no hay omitidas: las 13 pruebas de symlinks que antes se saltaban por `WinError 1314` ahora se ejecutan de verdad. Cualquier «0 fallos» anterior a esto era un falso verde.
 
@@ -233,7 +236,7 @@ Prueba de regresión: `test_plain_file_is_rejected_without_destroying_the_sessio
 | J (corregido) | ~~trial_windows_fs.close() inconsistente~~ | ~~Baja~~ | ~~resuelto 30 jul~~ |
 | ~~Q~~ | ~~Intermitencia residual: el propietario moría aleatoriamente~~ **CORREGIDO**, ver abajo | — | resuelto 30 jul |
 | ~~R~~ | ~~La suite se volvió un 50% más lenta y con mucha varianza~~ **RESUELTO como efecto colateral de Q.** La lentitud era *consecuencia* de la carrera, no su causa: al corregirla, el subconjunto pasó de 58-164 s con varianza enorme a 27-30 s en banda estrecha | — | resuelto 30 jul |
-| ~~P~~ | ~~Los descendientes del propietario le sobreviven en Windows~~ **CORREGIDO (31 jul)**: `_bind_owner_to_job()` asigna al propietario a un Job Object con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` al arrancar `_Owner.run()`. Los hijos heredan la pertenencia y mueren con él. El iniciador **no** está en el job, así que la premisa de la Fase 8.5 se conserva — verificado explícitamente con `test_owner_survives_a_completely_separate_initiator`. El handle del job se deja abierto a propósito: es el mecanismo. Si el sistema rechaza la asignación, el propietario sigue vivo: es endurecimiento de limpieza, no una frontera de seguridad | — | resuelto 31 jul |
+| ~~P~~ | ~~Los descendientes del propietario le sobreviven en Windows~~ **CORREGIDO (31 jul)**: `_bind_owner_to_job()` asigna al propietario a un Job Object con `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` al arrancar `_Owner.run()`. Los hijos heredan la pertenencia y mueren con él. El iniciador **no** está en el job. **Ojo con lo que está y no está probado:** `test_owner_survives_a_completely_separate_initiator` verifica la propiedad *complementaria* —que el job no rompe la premisa de la Fase 8.5— pero **no existe ninguna prueba de que los hijos mueran con el propietario**. Ese mecanismo está implementado y razonado, no verificado. Lo detectó la segunda reauditoría independiente tras una afirmación errónea de este documento. El handle del job se deja abierto a propósito: es el mecanismo. Si el sistema rechaza la asignación, el propietario sigue vivo: es endurecimiento de limpieza, no una frontera de seguridad | — | resuelto 31 jul |
 | ~~T~~ | ~~Las pruebas dejan carpetas en `%TEMP%`~~ **FALSA ALARMA, medido el 31 jul**: 62 carpetas antes de la suite y 62 después, cero avisos. Las pruebas no filtran nada; lo acumulado es histórico de días anteriores, incluidas ~20 de la cuenta `CodexSandboxOffli…` que requieren `takeown` desde una consola elevada. Aun así se sustituyeron los 14 `shutil.rmtree(..., ignore_errors=True)` por el helper `_purgar`, que reintenta y **avisa con el motivo** si alguna vez falla un borrado, en lugar de callarlo | — | resuelto 31 jul |
 | ~~P-viejo~~ | ~~Riesgo de diseño abierto: los descendientes del propietario le sobreviven en Windows~~ | Media (diseño) | `TrialProcessLauncher.start` |
 
